@@ -1,18 +1,11 @@
 // ============================================================
 // main.rs — Broker entry point
 //
-// Startup sequence:
-//   1. Broker binds TCP listener on 7777
-//   2. Producer task spawned — it will register then become a server
-//   3. Broker accept loop — each connection gets a dedicated task
-//
-// handle_connection now understands ONE special command:
-//   REGISTER_PRODUCER <port>
-//     → sends ACK back to producer
-//     → spawns a task that dials back to producer's port
-//     → reads ECHO messages from producer, responds
-//
-// All other input still echoes — full protocol comes in protocol.rs
+// Changes from previous version:
+//   - CREATE_TOPIC command removed — topics auto-created by broker
+//   - REGISTER_PRODUCER handler updated: calls broker.register_producer()
+//     which handles topic creation internally
+//   - dial_back_to_producer passes raw bytes to broker.produce()
 // ============================================================
 
 mod broker;
@@ -20,43 +13,44 @@ mod consumer;
 mod producer;
 mod topic;
 
+use broker::Broker;
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{Duration, sleep};
 
 const ADDR: &str = "127.0.0.1:7777";
 
+type SharedBroker = Arc<Mutex<Broker>>;
+
 #[tokio::main]
 async fn main() {
-    // Step 1 — bind listener BEFORE spawning producer (eliminates race condition)
     let listener = TcpListener::bind(ADDR).await.unwrap();
     println!("[broker] Listening on {}", ADDR);
 
-    // Step 2 — spawn producer: it will register on 7777, then listen on 7778
-    tokio::spawn(producer::run("prod-1", 7778));
+    let shared: SharedBroker = Arc::new(Mutex::new(Broker::new()));
 
-    // Step 3 — accept loop
+    // Producer spawned after broker binds — producer itself binds its
+    // own port first before registering, so no race on either side
+    tokio::spawn(producer::run("prod-1", "orders", 7778));
+
     loop {
         match listener.accept().await {
             Ok((socket, addr)) => {
                 println!("[broker] New connection from {}", addr);
-                tokio::spawn(handle_connection(socket));
+                let broker = Arc::clone(&shared);
+                tokio::spawn(handle_connection(socket, broker));
             }
-            Err(e) => {
-                eprintln!("[broker] Accept error: {}", e);
-            }
+            Err(e) => eprintln!("[broker] Accept error: {}", e),
         }
     }
 }
 
-/// Dedicated connection task — one per connected client.
-/// Handles REGISTER_PRODUCER specially; everything else echoes.
-async fn handle_connection(socket: TcpStream) {
+async fn handle_connection(socket: TcpStream, broker: SharedBroker) {
     let (reader, mut writer) = socket.into_split();
     let mut buf_reader = BufReader::new(reader);
     let mut line = String::new();
 
-    // Welcome banner
     let _ = writer
         .write_all(b"[mini-kafka] Connected. Ready for commands.\n")
         .await;
@@ -75,44 +69,72 @@ async fn handle_connection(socket: TcpStream) {
                     continue;
                 }
 
-                println!("[broker] Received: {:?}", command);
+                println!("[broker] Command: {:?}", command);
 
                 // -----------------------------------------------
-                // REGISTER_PRODUCER <port>
-                //   1. ACK the producer
-                //   2. Dial back to producer's port in a new task
-                //   3. This registration connection ends after ACK
+                // REGISTER_PRODUCER <id> <topic> <port>
+                // Broker auto-creates topic if missing, then dials back
                 // -----------------------------------------------
                 if command.starts_with("REGISTER_PRODUCER") {
-                    let parts: Vec<&str> = command.splitn(2, ' ').collect();
+                    let parts: Vec<&str> = command.splitn(4, ' ').collect();
 
-                    if parts.len() < 2 {
-                        let _ = writer.write_all(b"ERR missing port\n").await;
+                    if parts.len() < 4 {
+                        let _ = writer
+                            .write_all(b"ERR usage: REGISTER_PRODUCER <id> <topic> <port>\n")
+                            .await;
                         break;
                     }
 
-                    match parts[1].trim().parse::<u16>() {
+                    let (id, topic_name, port_str) = (parts[1], parts[2], parts[3].trim());
+
+                    match port_str.parse::<u16>() {
                         Err(_) => {
                             let _ = writer.write_all(b"ERR invalid port\n").await;
                             break;
                         }
                         Ok(port) => {
-                            // Send ACK back to producer
-                            let _ = writer.write_all(b"OK registered\n").await;
-                            println!(
-                                "[broker] Producer registered — dialing back on port {}",
-                                port
-                            );
+                            // register_producer auto-creates topic internally
+                            let response = {
+                                let mut b = broker.lock().unwrap();
+                                b.register_producer(id, topic_name)
+                            };
 
-                            // Spawn task: broker dials back to producer
-                            tokio::spawn(dial_back_to_producer(port));
+                            let _ = writer.write_all(response.as_bytes()).await;
 
-                            // Registration connection is done
-                            break;
+                            if response.starts_with("OK") {
+                                println!(
+                                    "[broker] '{}' registered to '{}' — dialing back on {}",
+                                    id, topic_name, port
+                                );
+                                let broker_clone = Arc::clone(&broker);
+                                let topic_owned = topic_name.to_string();
+                                tokio::spawn(dial_back_to_producer(
+                                    port,
+                                    topic_owned,
+                                    broker_clone,
+                                ));
+                            }
+                            break; // registration connection ends
                         }
                     }
+
+                // -----------------------------------------------
+                // CONSUME <topic> <group>
+                // -----------------------------------------------
+                } else if command.starts_with("CONSUME") {
+                    let parts: Vec<&str> = command.splitn(3, ' ').collect();
+                    let response = if parts.len() < 3 {
+                        "ERR usage: CONSUME <topic> <group>\n".to_string()
+                    } else {
+                        let mut b = broker.lock().unwrap();
+                        b.consume(parts[1], parts[2])
+                    };
+                    let _ = writer.write_all(response.as_bytes()).await;
+
+                // -----------------------------------------------
+                // Everything else — echo
+                // -----------------------------------------------
                 } else {
-                    // Everything else echoes — protocol.rs will replace this
                     let response = format!("[echo] {}\n", command);
                     if writer.write_all(response.as_bytes()).await.is_err() {
                         break;
@@ -127,22 +149,21 @@ async fn handle_connection(socket: TcpStream) {
     }
 }
 
-/// Broker dials INTO the producer's port.
-/// Mirrors the professor's goroutine inside processProducerRegisterMessage:
-///   conn, _ := net.Dial("tcp", fmt.Sprintf(":%d", port))
-///   for { readMessageFromStream / processBrokerMessage / writeMessageToStream }
-async fn dial_back_to_producer(port: u16) {
+/// Broker dials back into producer's port.
+/// Reads PRODUCE commands, stores raw bytes in the ring buffer.
+async fn dial_back_to_producer(port: u16, topic: String, broker: SharedBroker) {
     let addr = format!("127.0.0.1:{}", port);
 
-    // Small delay — give producer time to reach ln.Accept()
-    sleep(Duration::from_millis(150)).await;
+    // Producer already has its listener bound before registering —
+    // no delay needed, but a tiny yield helps task scheduling
+    sleep(Duration::from_millis(50)).await;
 
     println!("[broker] Dialing back to producer at {}", addr);
 
     let stream = match TcpStream::connect(&addr).await {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("[broker] Could not dial back to producer: {}", e);
+            eprintln!("[broker] Could not reach producer at {}: {}", addr, e);
             return;
         }
     };
@@ -153,13 +174,12 @@ async fn dial_back_to_producer(port: u16) {
     let mut buf_reader = BufReader::new(reader);
     let mut line = String::new();
 
-    // Read ECHO messages from producer, respond to each
     loop {
         line.clear();
 
         match buf_reader.read_line(&mut line).await {
             Ok(0) => {
-                println!("[broker] Producer closed connection.");
+                println!("[broker] Producer at {} disconnected.", addr);
                 break;
             }
             Ok(_) => {
@@ -168,13 +188,14 @@ async fn dial_back_to_producer(port: u16) {
                     continue;
                 }
 
-                println!("[broker→producer] Received: {:?}", msg);
+                println!("[broker←producer] {:?}", msg);
 
-                // Handle ECHO — strip prefix, wrap response
-                let response = if let Some(payload) = msg.strip_prefix("ECHO ") {
-                    format!("[echo] {}\n", payload)
+                // Strip "PRODUCE " prefix, store raw bytes in ring buffer
+                let response = if let Some(payload) = msg.strip_prefix("PRODUCE ") {
+                    let mut b = broker.lock().unwrap();
+                    b.produce(&topic, payload.as_bytes())
                 } else {
-                    format!("[echo] {}\n", msg)
+                    format!("ERR unknown command: {}\n", msg)
                 };
 
                 if writer.write_all(response.as_bytes()).await.is_err() {

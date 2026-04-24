@@ -1,5 +1,13 @@
-// broker.rs — owns all topics and consumer groups
-// Depends on: topic.rs, consumer.rs
+// ============================================================
+// broker.rs — Broker
+//
+// Key changes from previous version:
+//   - create_topic() is now PRIVATE — called internally only
+//   - register_producer() auto-creates topic if missing (lazy init)
+//     mirrors professor's processProducerRegisterMessage logic exactly
+//   - produce() now takes &[u8] (raw bytes) instead of String,
+//     matching the ring buffer's byte-oriented API
+// ============================================================
 
 use crate::consumer::ConsumerGroup;
 use crate::topic::Topic;
@@ -8,6 +16,7 @@ use std::collections::HashMap;
 pub struct Broker {
     topics: HashMap<String, Topic>,
     groups: HashMap<String, ConsumerGroup>,
+    producers: HashMap<String, String>, // producer_id -> topic_name
 }
 
 impl Broker {
@@ -15,153 +24,173 @@ impl Broker {
         Broker {
             topics: HashMap::new(),
             groups: HashMap::new(),
+            producers: HashMap::new(),
         }
     }
 
-    pub fn create_topic(&mut self, name: &str) -> String {
-        if self.topics.contains_key(name) {
-            return format!("ERR topic '{}' already exists\n", name);
+    // ----------------------------------------------------------
+    // Private — called internally by register_producer if needed.
+    // Mirrors professor's lazy topic creation inside
+    // processProducerRegisterMessage.
+    // ----------------------------------------------------------
+    fn create_topic_if_missing(&mut self, topic_name: &str) {
+        if !self.topics.contains_key(topic_name) {
+            self.topics
+                .insert(topic_name.to_string(), Topic::new(topic_name));
+            println!("[broker] Topic '{}' auto-created", topic_name);
         }
-        self.topics.insert(name.to_string(), Topic::new(name));
-        format!("OK topic '{}' created\n", name)
     }
 
-    pub fn register_producer(&mut self, topic: &str) -> String {
-        if !self.topics.contains_key(topic) {
-            return format!("ERR topic '{}' does not exist\n", topic);
-        }
-        format!("OK producer registered on '{}'\n", topic)
+    // ----------------------------------------------------------
+    // REGISTER_PRODUCER <id> <topic> <port>
+    // Auto-creates topic if it doesn't exist.
+    // ----------------------------------------------------------
+    pub fn register_producer(&mut self, producer_id: &str, topic_name: &str) -> String {
+        // Lazy topic creation — no separate CREATE_TOPIC needed
+        self.create_topic_if_missing(topic_name);
+        self.producers
+            .insert(producer_id.to_string(), topic_name.to_string());
+        format!(
+            "OK producer '{}' registered to '{}'\n",
+            producer_id, topic_name
+        )
     }
 
-    pub fn produce(&mut self, topic: &str, payload: String) -> String {
-        match self.topics.get_mut(topic) {
-            None => format!("ERR topic '{}' does not exist\n", topic),
-            Some(t) => {
-                let offset = t.append(payload);
+    // ----------------------------------------------------------
+    // PRODUCE <message>
+    // Raw bytes — matches ring buffer's byte-oriented storage.
+    // ----------------------------------------------------------
+    pub fn produce(&mut self, topic_name: &str, payload: &[u8]) -> String {
+        match self.topics.get_mut(topic_name) {
+            None => format!("ERR topic '{}' does not exist\n", topic_name),
+            Some(topic) => {
+                let offset = topic.append(payload);
                 format!("OK offset {}\n", offset)
             }
         }
     }
 
-    pub fn consume(&mut self, topic: &str, group: &str) -> String {
-        // Ensure topic exists
-        if !self.topics.contains_key(topic) {
-            return format!("ERR topic '{}' does not exist\n", topic);
+    // ----------------------------------------------------------
+    // CONSUME <topic> <group>
+    // Returns raw bytes as a UTF-8 string for now.
+    // Consumer offset advances only on successful read.
+    // ----------------------------------------------------------
+    pub fn consume(&mut self, topic_name: &str, group_name: &str) -> String {
+        if !self.topics.contains_key(topic_name) {
+            return format!("ERR topic '{}' does not exist\n", topic_name);
         }
 
-        // Get or create consumer group
-        let cg = self
+        let group = self
             .groups
-            .entry(group.to_string())
-            .or_insert_with(|| ConsumerGroup::new(group));
+            .entry(group_name.to_string())
+            .or_insert_with(|| ConsumerGroup::new(group_name));
 
-        let offset = cg.get_offset(topic);
+        let offset = group.get_offset(topic_name);
+        let topic = self.topics.get(topic_name).unwrap();
 
-        // Read from topic at group's current offset
-        match self.topics.get(topic).unwrap().read_at(offset) {
+        match topic.read_at(offset) {
             None => format!("EMPTY no messages at offset {}\n", offset),
-            Some(msg) => {
-                let payload = msg.payload.clone();
-                // Advance only AFTER successful read
-                self.groups.get_mut(group).unwrap().advance(topic);
-                format!("MSG offset={} payload={}\n", offset, payload)
+            Some(bytes) => {
+                let payload = String::from_utf8_lossy(bytes).to_string();
+                let response = format!("MSG offset={} payload={}\n", offset, payload);
+                self.groups.get_mut(group_name).unwrap().advance(topic_name);
+                response
             }
         }
     }
 }
 
-// ─── Tests ────────────────────────────────────────────────────────────────────
-
+// ============================================================
+// Tests
+// ============================================================
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn setup() -> Broker {
-        let mut b = Broker::new();
-        b.create_topic("orders");
-        b
+        let mut broker = Broker::new();
+        // Register a producer — this auto-creates the topic
+        broker.register_producer("prod-1", "orders");
+        broker
     }
 
     #[test]
-    fn create_topic_succeeds() {
-        let mut b = Broker::new();
-        let res = b.create_topic("orders");
-        assert!(res.starts_with("OK"));
+    fn test_register_producer_auto_creates_topic() {
+        let mut broker = Broker::new();
+        let res = broker.register_producer("prod-1", "orders");
+        assert!(res.contains("OK"));
+        // Topic should exist now — produce should work
+        let res2 = broker.produce("orders", b"test");
+        assert!(res2.contains("OK"));
     }
 
     #[test]
-    fn create_duplicate_topic_fails() {
-        let mut b = setup();
-        let res = b.create_topic("orders");
-        assert!(res.starts_with("ERR"));
+    fn test_register_same_topic_twice_does_not_fail() {
+        let mut broker = Broker::new();
+        broker.register_producer("prod-1", "orders");
+        // Second producer on same topic — topic already exists, should still succeed
+        let res = broker.register_producer("prod-2", "orders");
+        assert!(res.contains("OK"));
     }
 
     #[test]
-    fn produce_to_missing_topic_fails() {
-        let mut b = Broker::new();
-        let res = b.produce("ghost", "msg".to_string());
-        assert!(res.starts_with("ERR"));
+    fn test_produce_appends_and_returns_offset() {
+        let mut broker = setup();
+        let r1 = broker.produce("orders", b"msg-a");
+        let r2 = broker.produce("orders", b"msg-b");
+        assert!(r1.contains("offset 0"));
+        assert!(r2.contains("offset 1"));
     }
 
     #[test]
-    fn produce_returns_sequential_offsets() {
-        let mut b = setup();
-        let r1 = b.produce("orders", "a".to_string());
-        let r2 = b.produce("orders", "b".to_string());
-        assert!(r1.contains("offset=0") || r1.contains("offset 0"));
-        assert!(r2.contains("offset=1") || r2.contains("offset 1"));
+    fn test_produce_to_missing_topic_fails() {
+        let mut broker = Broker::new();
+        let res = broker.produce("ghost", b"hello");
+        assert!(res.contains("ERR"));
     }
 
     #[test]
-    fn consume_returns_messages_in_order() {
-        let mut b = setup();
-        b.produce("orders", "first".to_string());
-        b.produce("orders", "second".to_string());
+    fn test_consume_returns_messages_in_order() {
+        let mut broker = setup();
+        broker.produce("orders", b"first");
+        broker.produce("orders", b"second");
 
-        let r1 = b.consume("orders", "payments-service");
-        let r2 = b.consume("orders", "payments-service");
-
+        let r1 = broker.consume("orders", "analytics");
+        let r2 = broker.consume("orders", "analytics");
         assert!(r1.contains("first"));
         assert!(r2.contains("second"));
     }
 
     #[test]
-    fn consume_empty_topic_returns_empty() {
-        let mut b = setup();
-        let res = b.consume("orders", "payments-service");
-        assert!(res.starts_with("EMPTY"));
+    fn test_consume_empty_returns_empty() {
+        let mut broker = setup();
+        let res = broker.consume("orders", "analytics");
+        assert!(res.contains("EMPTY"));
     }
 
     #[test]
-    fn two_groups_consume_same_topic_independently() {
-        let mut b = setup();
-        b.produce("orders", "msg-a".to_string());
-        b.produce("orders", "msg-b".to_string());
+    fn test_two_groups_independent() {
+        let mut broker = setup();
+        broker.produce("orders", b"msg-a");
+        broker.produce("orders", b"msg-b");
 
-        // payments reads first message
-        let p1 = b.consume("orders", "payments-service");
-        assert!(p1.contains("msg-a"));
-
-        // analytics hasn't read yet — still gets msg-a
-        let a1 = b.consume("orders", "analytics-service");
+        let a1 = broker.consume("orders", "group-a");
+        // group-b starts fresh at offset 0
+        let b1 = broker.consume("orders", "group-b");
         assert!(a1.contains("msg-a"));
+        assert!(b1.contains("msg-a"));
 
-        // payments continues to msg-b
-        let p2 = b.consume("orders", "payments-service");
-        assert!(p2.contains("msg-b"));
+        let a2 = broker.consume("orders", "group-a");
+        assert!(a2.contains("msg-b"));
     }
 
     #[test]
-    fn register_producer_on_missing_topic_fails() {
-        let mut b = Broker::new();
-        let res = b.register_producer("ghost");
-        assert!(res.starts_with("ERR"));
-    }
-
-    #[test]
-    fn register_producer_succeeds() {
-        let mut b = setup();
-        let res = b.register_producer("orders");
-        assert!(res.starts_with("OK"));
+    fn test_messages_persist_after_consume() {
+        let mut broker = setup();
+        broker.produce("orders", b"persistent");
+        broker.consume("orders", "group-a");
+        // group-b can still read the same message
+        let res = broker.consume("orders", "group-b");
+        assert!(res.contains("persistent"));
     }
 }
