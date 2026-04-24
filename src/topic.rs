@@ -47,6 +47,13 @@ impl Queue {
     /// If the buffer is full, the oldest message is evicted (base_offset advances),
     /// exactly like Kafka log retention.
     pub fn append(&mut self, payload: &[u8]) -> u64 {
+        // If tail has caught up to head, the ring is full.
+        // Evict the oldest message by advancing head and base_offset.
+        if self.next_offset - self.base_offset == QUEUE_CAPACITY as u64 {
+            self.head = (self.head + 1) % QUEUE_CAPACITY;
+            self.base_offset += 1;
+        }
+
         let len = payload.len().min(MAX_MSG_SIZE);
         let slot = self.tail;
 
@@ -57,13 +64,6 @@ impl Queue {
 
         // Advance tail
         self.tail = (self.tail + 1) % QUEUE_CAPACITY;
-
-        // If tail has caught up to head, the ring is full.
-        // Evict the oldest message by advancing head and base_offset.
-        if self.tail == self.head {
-            self.head = (self.head + 1) % QUEUE_CAPACITY;
-            self.base_offset += 1;
-        }
 
         let offset = self.next_offset;
         self.next_offset += 1;
