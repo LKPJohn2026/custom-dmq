@@ -118,14 +118,15 @@ async fn handle_broker_connection(socket: TcpStream, broker: SharedBroker) {
             let topic_id = reg.topic_id;
             let group_id = reg.group_id;
             let port = reg.port;
-            {
+            let partition_idx = {
                 let mut b = broker.lock().await;
-                b.register_consumer(reg);
-            }
+                b.register_consumer(reg)
+            };
             tokio::spawn(dial_back_to_consumer(
                 port,
                 topic_id,
                 group_id,
+                partition_idx,
                 Arc::clone(&broker),
             ));
             Message::RConsumerRegister(0)
@@ -188,7 +189,13 @@ async fn dial_back_to_producer(port: u16, topic_id: u16, broker: SharedBroker) {
     }
 }
 
-async fn dial_back_to_consumer(port: u16, topic_id: u16, group_id: u16, broker: SharedBroker) {
+async fn dial_back_to_consumer(
+    port: u16,
+    topic_id: u16,
+    group_id: u16,
+    partition_idx: u16,
+    broker: SharedBroker,
+) {
     let addr = format!("127.0.0.1:{}", port);
     sleep(Duration::from_millis(50)).await;
 
@@ -200,10 +207,20 @@ async fn dial_back_to_consumer(port: u16, topic_id: u16, group_id: u16, broker: 
         }
     };
 
-    println!("[broker] Connected to consumer at {addr} (topic {topic_id}, group {group_id})");
+    println!(
+        "[broker] Connected to consumer at {addr} (topic {topic_id}, group {group_id}, partition {partition_idx})"
+    );
 
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
 
-    run_consumer_ready_and_send(broker, topic_id, group_id, &mut reader, &mut writer).await;
+    run_consumer_ready_and_send(
+        broker,
+        topic_id,
+        group_id,
+        partition_idx,
+        &mut reader,
+        &mut writer,
+    )
+    .await;
 }

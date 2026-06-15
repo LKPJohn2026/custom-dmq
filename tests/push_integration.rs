@@ -199,11 +199,17 @@ async fn handle_registration(socket: TcpStream, broker: Arc<Mutex<Broker>>) {
             let topic_id = reg.topic_id;
             let group_id = reg.group_id;
             let port = reg.port;
-            {
+            let partition_idx = {
                 let mut b = broker.lock().await;
-                b.register_consumer(&reg);
-            }
-            tokio::spawn(dial_consumer(port, topic_id, group_id, Arc::clone(&broker)));
+                b.register_consumer(&reg)
+            };
+            tokio::spawn(dial_consumer(
+                port,
+                topic_id,
+                group_id,
+                partition_idx,
+                Arc::clone(&broker),
+            ));
             Message::RConsumerRegister(0)
         }
         Message::Echo(text) => Message::REcho(format!("I have receiver: {text}")),
@@ -237,12 +243,26 @@ async fn dial_producer(port: u16, topic_id: u16, broker: Arc<Mutex<Broker>>) {
     }
 }
 
-async fn dial_consumer(port: u16, topic_id: u16, group_id: u16, broker: Arc<Mutex<Broker>>) {
+async fn dial_consumer(
+    port: u16,
+    topic_id: u16,
+    group_id: u16,
+    partition_idx: u16,
+    broker: Arc<Mutex<Broker>>,
+) {
     sleep(Duration::from_millis(30)).await;
     let Ok(stream) = TcpStream::connect(format!("127.0.0.1:{port}")).await else {
         return;
     };
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
-    run_consumer_ready_and_send(broker, topic_id, group_id, &mut reader, &mut writer).await;
+    run_consumer_ready_and_send(
+        broker,
+        topic_id,
+        group_id,
+        partition_idx,
+        &mut reader,
+        &mut writer,
+    )
+    .await;
 }
