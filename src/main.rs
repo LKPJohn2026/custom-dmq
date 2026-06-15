@@ -1,20 +1,13 @@
 //! CLI entry point: `server`, `producer`, and `consumer` subcommands.
-//!
-//! Replaces the single-process broker that embedded a demo producer and handled
-//! text-line commands. Registration is one binary message per connection;
-//! PCM traffic flows on separate dial-back sockets.
 
 mod consumer_client;
 mod producer;
 
-use custom_dmq::broker::{broker_port, run_consumer_group_delivery, Broker};
-use custom_dmq::cgroup::{ConsumerHandle, PushRequest};
+use custom_dmq::broker::{broker_port, run_consumer_ready_and_send, Broker};
 use custom_dmq::message::Message;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::io::BufReader;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
 
@@ -125,17 +118,9 @@ async fn handle_broker_connection(socket: TcpStream, broker: SharedBroker) {
             let topic_id = reg.topic_id;
             let group_id = reg.group_id;
             let port = reg.port;
-            let is_new_group = {
+            {
                 let mut b = broker.lock().await;
-                let (_, is_new, _) = b.register_consumer(reg);
-                is_new
-            };
-            if is_new_group {
-                tokio::spawn(run_consumer_group_delivery(
-                    Arc::clone(&broker),
-                    topic_id,
-                    group_id,
-                ));
+                b.register_consumer(reg);
             }
             tokio::spawn(dial_back_to_consumer(
                 port,
@@ -217,52 +202,8 @@ async fn dial_back_to_consumer(port: u16, topic_id: u16, group_id: u16, broker: 
 
     println!("[broker] Connected to consumer at {addr} (topic {topic_id}, group {group_id})");
 
-    let ready = Arc::new(AtomicBool::new(true));
-    let (push_tx, mut push_rx) = mpsc::channel::<PushRequest>(16);
-
-    {
-        let mut b = broker.lock().await;
-        b.add_consumer_handle(
-            topic_id,
-            group_id,
-            ConsumerHandle {
-                port,
-                ready: Arc::clone(&ready),
-                push_tx: push_tx.clone(),
-            },
-        );
-    }
-
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
 
-    while let Some(req) = push_rx.recv().await {
-        ready.store(false, Ordering::SeqCst);
-
-        if custom_dmq::message::write_message(&mut writer, &Message::Pcm(req.payload))
-            .await
-            .is_err()
-        {
-            break;
-        }
-
-        let ack_ok = match custom_dmq::message::read_message(&mut reader).await {
-            Ok(Message::RPcm(_)) => true,
-            Ok(other) => {
-                eprintln!("[broker→consumer] Expected R_PCM, got {other:?}");
-                false
-            }
-            Err(e) => {
-                eprintln!("[broker→consumer] Read error: {e}");
-                false
-            }
-        };
-
-        ready.store(true, Ordering::SeqCst);
-        let _ = req.ack.send(());
-
-        if !ack_ok {
-            break;
-        }
-    }
+    run_consumer_ready_and_send(broker, topic_id, group_id, &mut reader, &mut writer).await;
 }

@@ -1,13 +1,11 @@
-//! Integration tests for binary registration and push delivery over TCP.
+//! Integration tests for binary registration and consumer delivery over TCP.
 
-use custom_dmq::broker::{broker_port, run_consumer_group_delivery, Broker};
-use custom_dmq::cgroup::{ConsumerHandle, PushRequest};
+use custom_dmq::broker::{broker_port, run_consumer_ready_and_send, Broker};
 use custom_dmq::message::{self, ConsumerRegister, Message, ProducerRegister};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::io::BufReader;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout, Duration};
 
 #[tokio::test]
@@ -36,7 +34,7 @@ async fn binary_protocol_roundtrip_on_duplex() {
 }
 
 #[tokio::test]
-async fn push_delivery_over_tcp() {
+async fn ready_initiated_delivery_over_tcp() {
     let port = pick_free_port();
     std::env::set_var("DMQ_BROKER_PORT", port.to_string());
 
@@ -60,7 +58,7 @@ async fn push_delivery_over_tcp() {
     let producer_task = tokio::spawn(run_test_producer(
         producer_port,
         topic_id,
-        b"hello-push".to_vec(),
+        b"hello-ready".to_vec(),
     ));
 
     let received = timeout(Duration::from_secs(5), consumer_task)
@@ -73,7 +71,7 @@ async fn push_delivery_over_tcp() {
         .expect("producer panicked")
         .expect("producer failed");
 
-    assert_eq!(received, b"hello-push".to_vec());
+    assert_eq!(received, b"hello-ready".to_vec());
     server.abort();
 }
 
@@ -151,15 +149,15 @@ async fn run_test_consumer(port: u16, topic_id: u16, group_id: u16) -> Vec<u8> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
 
-    let msg = message::read_message(&mut reader).await.expect("PCM");
-    let payload = match msg {
-        Message::Pcm(p) => p,
-        other => panic!("expected PCM, got {other:?}"),
-    };
     message::write_message(&mut writer, &Message::RPcm(1))
         .await
         .unwrap();
-    payload
+
+    let msg = message::read_message(&mut reader).await.expect("PCM");
+    match msg {
+        Message::Pcm(p) => p,
+        other => panic!("expected PCM, got {other:?}"),
+    }
 }
 
 async fn run_test_broker(broker: Arc<Mutex<Broker>>, port: u16) {
@@ -201,17 +199,9 @@ async fn handle_registration(socket: TcpStream, broker: Arc<Mutex<Broker>>) {
             let topic_id = reg.topic_id;
             let group_id = reg.group_id;
             let port = reg.port;
-            let is_new = {
+            {
                 let mut b = broker.lock().await;
-                let (_, is_new, _) = b.register_consumer(&reg);
-                is_new
-            };
-            if is_new {
-                tokio::spawn(run_consumer_group_delivery(
-                    Arc::clone(&broker),
-                    topic_id,
-                    group_id,
-                ));
+                b.register_consumer(&reg);
             }
             tokio::spawn(dial_consumer(port, topic_id, group_id, Arc::clone(&broker)));
             Message::RConsumerRegister(0)
@@ -252,41 +242,7 @@ async fn dial_consumer(port: u16, topic_id: u16, group_id: u16, broker: Arc<Mute
     let Ok(stream) = TcpStream::connect(format!("127.0.0.1:{port}")).await else {
         return;
     };
-
-    let ready = Arc::new(AtomicBool::new(true));
-    let (push_tx, mut push_rx) = mpsc::channel::<PushRequest>(8);
-    {
-        let mut b = broker.lock().await;
-        b.add_consumer_handle(
-            topic_id,
-            group_id,
-            ConsumerHandle {
-                port,
-                ready: Arc::clone(&ready),
-                push_tx,
-            },
-        );
-    }
-
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
-
-    while let Some(req) = push_rx.recv().await {
-        ready.store(false, Ordering::SeqCst);
-        if message::write_message(&mut writer, &Message::Pcm(req.payload))
-            .await
-            .is_err()
-        {
-            break;
-        }
-        let ok = matches!(
-            message::read_message(&mut reader).await,
-            Ok(Message::RPcm(_))
-        );
-        ready.store(true, Ordering::SeqCst);
-        let _ = req.ack.send(());
-        if !ok {
-            break;
-        }
-    }
+    run_consumer_ready_and_send(broker, topic_id, group_id, &mut reader, &mut writer).await;
 }

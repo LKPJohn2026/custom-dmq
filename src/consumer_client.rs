@@ -1,8 +1,7 @@
-//! Consumer client with broker-initiated push delivery.
+//! Consumer client with ready-initiated delivery.
 //!
-//! New in this change: consumers register with C_REG, accept a broker dial-back,
-//! receive pushed PCM frames, and acknowledge each message with R_PCM.
-//! Replaces the prior pull-style `CONSUME` command on the broker port.
+//! The consumer sends R_PCM to signal readiness, then reads the PCM frame
+//! the broker delivers at the group's current log offset.
 
 use custom_dmq::broker::broker_addr;
 use custom_dmq::message::{ConsumerRegister, Message};
@@ -60,25 +59,24 @@ async fn receive_loop(stream: TcpStream) {
     let (reader, mut writer) = stream.into_split();
     let mut buf = BufReader::new(reader);
 
-    println!("[consumer] Ready — waiting for broker push...");
+    println!("[consumer] Ready — send R_PCM to request next message");
 
     loop {
+        if custom_dmq::message::write_message(&mut writer, &Message::RPcm(1))
+            .await
+            .is_err()
+        {
+            break;
+        }
+
         match custom_dmq::message::read_message(&mut buf).await {
             Ok(Message::Pcm(payload)) => {
                 let text = String::from_utf8_lossy(&payload);
                 println!("[consumer] Received PCM: {text}");
-
-                sleep(Duration::from_millis(50)).await;
-
-                if custom_dmq::message::write_message(&mut writer, &Message::RPcm(1))
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
             }
             Ok(other) => {
                 println!("[consumer] Unexpected message: {other:?}");
+                break;
             }
             Err(e) => {
                 eprintln!("[consumer] Connection closed: {e}");
