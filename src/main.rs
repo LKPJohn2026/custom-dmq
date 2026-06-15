@@ -1,211 +1,268 @@
-// ============================================================
-// main.rs — Broker entry point
-//
-// Changes from previous version:
-//   - CREATE_TOPIC command removed — topics auto-created by broker
-//   - REGISTER_PRODUCER handler updated: calls broker.register_producer()
-//     which handles topic creation internally
-//   - dial_back_to_producer passes raw bytes to broker.produce()
-// ============================================================
+//! CLI entry point: `server`, `producer`, and `consumer` subcommands.
+//!
+//! Replaces the single-process broker that embedded a demo producer and handled
+//! text-line commands. Registration is one binary message per connection;
+//! PCM traffic flows on separate dial-back sockets.
 
-mod broker;
-mod consumer;
+mod consumer_client;
 mod producer;
-mod topic;
 
-use broker::Broker;
-use std::sync::{Arc, Mutex};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use custom_dmq::broker::{broker_port, run_consumer_group_delivery, Broker};
+use custom_dmq::cgroup::{ConsumerHandle, PushRequest};
+use custom_dmq::message::Message;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use tokio::io::BufReader;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::time::{Duration, sleep};
-
-const ADDR: &str = "127.0.0.1:7777";
+use tokio::sync::mpsc;
+use tokio::sync::Mutex;
+use tokio::time::{sleep, Duration};
 
 type SharedBroker = Arc<Mutex<Broker>>;
 
 #[tokio::main]
 async fn main() {
-    let listener = TcpListener::bind(ADDR).await.unwrap();
-    println!("[broker] Listening on {}", ADDR);
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() < 2 {
+        print_usage();
+        std::process::exit(1);
+    }
 
-    let shared: SharedBroker = Arc::new(Mutex::new(Broker::new()));
+    match args[1].as_str() {
+        "server" => run_server().await,
+        "producer" => {
+            let port = parse_u16(&args, 2, "port");
+            let topic_id = parse_u16(&args, 3, "topic_id");
+            let simulate = args.get(4).map(|s| s == "--simulate").unwrap_or(false);
+            producer::run(port, topic_id, simulate).await;
+        }
+        "consumer" => {
+            let port = parse_u16(&args, 2, "port");
+            let topic_id = parse_u16(&args, 3, "topic_id");
+            let group_id = parse_u16(&args, 4, "group_id");
+            consumer_client::run(port, topic_id, group_id).await;
+        }
+        _ => {
+            print_usage();
+            std::process::exit(1);
+        }
+    }
+}
 
-    // Producer spawned after broker binds — producer itself binds its
-    // own port first before registering, so no race on either side
-    tokio::spawn(producer::run("prod-1", "orders", 7778));
+fn print_usage() {
+    eprintln!(
+        "Usage:
+  custom-dmq server
+  custom-dmq producer <port> <topic_id> [--simulate]
+  custom-dmq consumer <port> <topic_id> <group_id>"
+    );
+}
+
+fn parse_u16(args: &[String], idx: usize, name: &str) -> u16 {
+    args.get(idx)
+        .unwrap_or_else(|| {
+            eprintln!("Missing {name}");
+            print_usage();
+            std::process::exit(1);
+        })
+        .parse()
+        .unwrap_or_else(|_| {
+            eprintln!("Invalid {name}");
+            std::process::exit(1);
+        })
+}
+
+async fn run_server() {
+    let addr = format!("127.0.0.1:{}", broker_port());
+    let listener = TcpListener::bind(&addr).await.unwrap();
+    println!("[broker] Listening on {addr}");
+
+    let broker: SharedBroker = Arc::new(Mutex::new(Broker::new()));
 
     loop {
         match listener.accept().await {
-            Ok((socket, addr)) => {
-                println!("[broker] New connection from {}", addr);
-                let broker = Arc::clone(&shared);
-                tokio::spawn(handle_connection(socket, broker));
+            Ok((socket, peer)) => {
+                println!("[broker] Connection from {peer}");
+                let broker = Arc::clone(&broker);
+                tokio::spawn(handle_broker_connection(socket, broker));
             }
-            Err(e) => eprintln!("[broker] Accept error: {}", e),
+            Err(e) => eprintln!("[broker] Accept error: {e}"),
         }
     }
 }
 
-async fn handle_connection(socket: TcpStream, broker: SharedBroker) {
+async fn handle_broker_connection(socket: TcpStream, broker: SharedBroker) {
     let (reader, mut writer) = socket.into_split();
-    let mut buf_reader = BufReader::new(reader);
-    let mut line = String::new();
+    let mut buf = BufReader::new(reader);
 
-    let _ = writer
-        .write_all(b"[mini-kafka] Connected. Ready for commands.\n")
-        .await;
-
-    loop {
-        line.clear();
-
-        match buf_reader.read_line(&mut line).await {
-            Ok(0) => {
-                println!("[broker] Client disconnected.");
-                break;
-            }
-            Ok(_) => {
-                let command = line.trim().to_string();
-                if command.is_empty() {
-                    continue;
-                }
-
-                println!("[broker] Command: {:?}", command);
-
-                // -----------------------------------------------
-                // REGISTER_PRODUCER <id> <topic> <port>
-                // Broker auto-creates topic if missing, then dials back
-                // -----------------------------------------------
-                if command.starts_with("REGISTER_PRODUCER") {
-                    let parts: Vec<&str> = command.splitn(4, ' ').collect();
-
-                    if parts.len() < 4 {
-                        let _ = writer
-                            .write_all(b"ERR usage: REGISTER_PRODUCER <id> <topic> <port>\n")
-                            .await;
-                        break;
-                    }
-
-                    let (id, topic_name, port_str) = (parts[1], parts[2], parts[3].trim());
-
-                    match port_str.parse::<u16>() {
-                        Err(_) => {
-                            let _ = writer.write_all(b"ERR invalid port\n").await;
-                            break;
-                        }
-                        Ok(port) => {
-                            // register_producer auto-creates topic internally
-                            let response = {
-                                let mut b = broker.lock().unwrap();
-                                b.register_producer(id, topic_name)
-                            };
-
-                            let _ = writer.write_all(response.as_bytes()).await;
-
-                            if response.starts_with("OK") {
-                                println!(
-                                    "[broker] '{}' registered to '{}' — dialing back on {}",
-                                    id, topic_name, port
-                                );
-                                let broker_clone = Arc::clone(&broker);
-                                let topic_owned = topic_name.to_string();
-                                tokio::spawn(dial_back_to_producer(
-                                    port,
-                                    topic_owned,
-                                    broker_clone,
-                                ));
-                            }
-                            break; // registration connection ends
-                        }
-                    }
-
-                // -----------------------------------------------
-                // CONSUME <topic> <group>
-                // -----------------------------------------------
-                } else if command.starts_with("CONSUME") {
-                    let parts: Vec<&str> = command.splitn(3, ' ').collect();
-                    let response = if parts.len() < 3 {
-                        "ERR usage: CONSUME <topic> <group>\n".to_string()
-                    } else {
-                        let mut b = broker.lock().unwrap();
-                        b.consume(parts[1], parts[2])
-                    };
-                    let _ = writer.write_all(response.as_bytes()).await;
-
-                // -----------------------------------------------
-                // Everything else — echo
-                // -----------------------------------------------
-                } else {
-                    let response = format!("[echo] {}\n", command);
-                    if writer.write_all(response.as_bytes()).await.is_err() {
-                        break;
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("[broker] Read error: {}", e);
-                break;
-            }
-        }
-    }
-}
-
-/// Broker dials back into producer's port.
-/// Reads PRODUCE commands, stores raw bytes in the ring buffer.
-async fn dial_back_to_producer(port: u16, topic: String, broker: SharedBroker) {
-    let addr = format!("127.0.0.1:{}", port);
-
-    // Producer already has its listener bound before registering —
-    // no delay needed, but a tiny yield helps task scheduling
-    sleep(Duration::from_millis(50)).await;
-
-    println!("[broker] Dialing back to producer at {}", addr);
-
-    let stream = match TcpStream::connect(&addr).await {
-        Ok(s) => s,
+    let message = match custom_dmq::message::read_message(&mut buf).await {
+        Ok(m) => m,
         Err(e) => {
-            eprintln!("[broker] Could not reach producer at {}: {}", addr, e);
+            eprintln!("[broker] Read error: {e}");
             return;
         }
     };
 
-    println!("[broker] Connected to producer at {}", addr);
+    let response = match &message {
+        Message::Echo(text) => {
+            let reply = {
+                let b = broker.lock().await;
+                b.process_echo(text)
+            };
+            Message::REcho(reply)
+        }
+        Message::ProducerRegister(reg) => {
+            let topic_id = reg.topic_id;
+            let port = reg.port;
+            {
+                let mut b = broker.lock().await;
+                b.register_producer(reg);
+            }
+            tokio::spawn(dial_back_to_producer(port, topic_id, Arc::clone(&broker)));
+            Message::RProducerRegister(0)
+        }
+        Message::ConsumerRegister(reg) => {
+            let topic_id = reg.topic_id;
+            let group_id = reg.group_id;
+            let port = reg.port;
+            let is_new_group = {
+                let mut b = broker.lock().await;
+                let (_, is_new, _) = b.register_consumer(reg);
+                is_new
+            };
+            if is_new_group {
+                tokio::spawn(run_consumer_group_delivery(
+                    Arc::clone(&broker),
+                    topic_id,
+                    group_id,
+                ));
+            }
+            tokio::spawn(dial_back_to_consumer(
+                port,
+                topic_id,
+                group_id,
+                Arc::clone(&broker),
+            ));
+            Message::RConsumerRegister(0)
+        }
+        other => {
+            eprintln!("[broker] Unexpected message on register port: {other:?}");
+            return;
+        }
+    };
+
+    if custom_dmq::message::write_message(&mut writer, &response)
+        .await
+        .is_err()
+    {
+        eprintln!("[broker] Failed to write response");
+    }
+}
+
+async fn dial_back_to_producer(port: u16, topic_id: u16, broker: SharedBroker) {
+    let addr = format!("127.0.0.1:{}", port);
+    sleep(Duration::from_millis(50)).await;
+
+    let stream = match TcpStream::connect(&addr).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[broker] Could not dial producer at {addr}: {e}");
+            return;
+        }
+    };
+
+    println!("[broker] Connected to producer at {addr} (topic {topic_id})");
 
     let (reader, mut writer) = stream.into_split();
-    let mut buf_reader = BufReader::new(reader);
-    let mut line = String::new();
+    let mut buf = BufReader::new(reader);
 
     loop {
-        line.clear();
-
-        match buf_reader.read_line(&mut line).await {
-            Ok(0) => {
-                println!("[broker] Producer at {} disconnected.", addr);
-                break;
-            }
-            Ok(_) => {
-                let msg = line.trim();
-                if msg.is_empty() {
-                    continue;
-                }
-
-                println!("[broker←producer] {:?}", msg);
-
-                // Strip "PRODUCE " prefix, store raw bytes in ring buffer
-                let response = if let Some(payload) = msg.strip_prefix("PRODUCE ") {
-                    let mut b = broker.lock().unwrap();
-                    b.produce(&topic, payload.as_bytes())
-                } else {
-                    format!("ERR unknown command: {}\n", msg)
+        match custom_dmq::message::read_message(&mut buf).await {
+            Ok(Message::Pcm(payload)) => {
+                let (code, offset) = {
+                    let mut b = broker.lock().await;
+                    b.produce_pcm(topic_id, &payload)
                 };
-
-                if writer.write_all(response.as_bytes()).await.is_err() {
+                println!(
+                    "[broker←producer] topic={topic_id} offset={offset} len={}",
+                    payload.len()
+                );
+                if custom_dmq::message::write_message(&mut writer, &Message::RPcm(code))
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
+            Ok(other) => eprintln!("[broker←producer] Unexpected: {other:?}"),
             Err(e) => {
-                eprintln!("[broker] Read error from producer: {}", e);
+                eprintln!("[broker] Producer disconnected: {e}");
                 break;
             }
+        }
+    }
+}
+
+async fn dial_back_to_consumer(port: u16, topic_id: u16, group_id: u16, broker: SharedBroker) {
+    let addr = format!("127.0.0.1:{}", port);
+    sleep(Duration::from_millis(50)).await;
+
+    let stream = match TcpStream::connect(&addr).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[broker] Could not dial consumer at {addr}: {e}");
+            return;
+        }
+    };
+
+    println!("[broker] Connected to consumer at {addr} (topic {topic_id}, group {group_id})");
+
+    let ready = Arc::new(AtomicBool::new(true));
+    let (push_tx, mut push_rx) = mpsc::channel::<PushRequest>(16);
+
+    {
+        let mut b = broker.lock().await;
+        b.add_consumer_handle(
+            topic_id,
+            group_id,
+            ConsumerHandle {
+                port,
+                ready: Arc::clone(&ready),
+                push_tx: push_tx.clone(),
+            },
+        );
+    }
+
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+
+    while let Some(req) = push_rx.recv().await {
+        ready.store(false, Ordering::SeqCst);
+
+        if custom_dmq::message::write_message(&mut writer, &Message::Pcm(req.payload))
+            .await
+            .is_err()
+        {
+            break;
+        }
+
+        let ack_ok = match custom_dmq::message::read_message(&mut reader).await {
+            Ok(Message::RPcm(_)) => true,
+            Ok(other) => {
+                eprintln!("[broker→consumer] Expected R_PCM, got {other:?}");
+                false
+            }
+            Err(e) => {
+                eprintln!("[broker→consumer] Read error: {e}");
+                false
+            }
+        };
+
+        ready.store(true, Ordering::SeqCst);
+        let _ = req.ack.send(());
+
+        if !ack_ok {
+            break;
         }
     }
 }

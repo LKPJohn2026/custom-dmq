@@ -1,161 +1,124 @@
-// ============================================================
-// producer.rs — Producer (race-condition fixed)
-//
-// Startup order:
-//   1. Bind own TCP port FIRST (ln.Listen before sendPortDataToBroker)
-//   2. Then connect to broker and send REGISTER_PRODUCER
-//   3. Then ln.Accept() — broker is guaranteed to have our port ready
-//
-// No CREATE_TOPIC phase — broker auto-creates topic on registration.
-//
-// Messages are sent as raw bytes (PCM-style), matching the ring
-// buffer's byte-oriented API.
-// ============================================================
+//! Producer client using binary P_REG / PCM frames.
+//!
+//! Updated from text `REGISTER_PRODUCER` to the binary protocol. Startup order:
+//!   1. Bind own TCP port
+//!   2. Send P_REG to broker
+//!   3. Accept broker dial-back
+//!   4. Send PCM payloads on the persistent connection
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use custom_dmq::broker::broker_addr;
+use custom_dmq::message::{Message, ProducerRegister};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::time::{Duration, sleep};
+use tokio::time::{sleep, Duration};
 
-const BROKER_ADDR: &str = "127.0.0.1:7777";
+pub async fn run(port: u16, topic_id: u16, simulate: bool) {
+    let addr = format!("127.0.0.1:{}", port);
+    let broker_addr = broker_addr();
 
-pub async fn run(producer_id: &str, topic: &str, own_port: u16) {
-    let producer_id = producer_id.to_string();
-    let topic = topic.to_string();
-    let addr = format!("127.0.0.1:{}", own_port);
-
-    // Small delay — let broker bind 7777 first
     sleep(Duration::from_millis(100)).await;
 
-    // -------------------------------------------------------
-    // STEP 1 — Bind OUR listener first (professor's order)
-    // This eliminates the race: broker can dial back immediately
-    // after registration, and our Accept() will be ready.
-    // -------------------------------------------------------
     let listener = TcpListener::bind(&addr)
         .await
         .expect("[producer] Could not bind own port");
-    println!(
-        "[producer:{}] Listening on {} (waiting for broker dial-back)",
-        producer_id, addr
-    );
+    println!("[producer] Listening on {addr} (topic_id={topic_id}, waiting for broker dial-back)");
 
-    // -------------------------------------------------------
-    // STEP 2 — Register with broker
-    // Single message: REGISTER_PRODUCER <id> <topic> <port>
-    // No CREATE_TOPIC — broker handles that internally
-    // -------------------------------------------------------
-    println!(
-        "[producer:{}] Connecting to broker for registration...",
-        producer_id
-    );
-
-    let stream = TcpStream::connect(BROKER_ADDR)
+    let stream = TcpStream::connect(&broker_addr)
         .await
         .expect("[producer] Could not connect to broker");
 
     let (reader, mut writer) = stream.into_split();
     let mut buf = BufReader::new(reader);
-    let mut line = String::new();
 
-    // Read welcome banner
-    buf.read_line(&mut line).await.unwrap();
-    println!("[producer:{}] {}", producer_id, line.trim());
-    line.clear();
+    let reg = ProducerRegister { port, topic_id };
+    custom_dmq::message::write_message(&mut writer, &Message::ProducerRegister(reg))
+        .await
+        .expect("register write");
 
-    // Send registration
-    let reg = format!("REGISTER_PRODUCER {} {} {}\n", producer_id, topic, own_port);
-    writer.write_all(reg.as_bytes()).await.unwrap();
-    println!(
-        "[producer:{}] Sent: REGISTER_PRODUCER {} {} {}",
-        producer_id, producer_id, topic, own_port
-    );
+    println!("[producer] Sent P_REG port={port} topic_id={topic_id}");
 
-    // Read ACK
-    buf.read_line(&mut line).await.unwrap();
-    println!("[producer:{}] Broker: {}", producer_id, line.trim());
-
-    if line.trim().starts_with("ERR") {
-        eprintln!("[producer:{}] Registration failed. Exiting.", producer_id);
-        return;
+    let resp = custom_dmq::message::read_message(&mut buf)
+        .await
+        .expect("register response");
+    match resp {
+        Message::RProducerRegister(code) => println!("[producer] Broker ack: {code}"),
+        other => eprintln!("[producer] Unexpected response: {other:?}"),
     }
-    // Registration connection ends here
 
-    // -------------------------------------------------------
-    // STEP 3 — Accept broker's dial-back connection
-    // Broker guaranteed to dial us now — listener was ready
-    // before we even sent the registration message
-    // -------------------------------------------------------
-    let (broker_conn, broker_addr) = listener
+    let (broker_conn, broker_peer) = listener
         .accept()
         .await
-        .expect("[producer] Failed to accept broker's connection");
-    println!(
-        "[producer:{}] Broker dialed back from {}",
-        producer_id, broker_addr
-    );
+        .expect("[producer] Failed to accept broker dial-back");
+    println!("[producer] Broker dialed back from {broker_peer}");
 
-    // -------------------------------------------------------
-    // STEP 4 — Message loop
-    // Read stdin → send as raw bytes → read offset ACK
-    // -------------------------------------------------------
-    message_loop(broker_conn, &producer_id, &topic).await;
+    if simulate {
+        simulate_loop(broker_conn, port).await;
+    } else {
+        stdin_loop(broker_conn).await;
+    }
 }
 
-async fn message_loop(stream: TcpStream, producer_id: &str, topic: &str) {
+async fn simulate_loop(stream: TcpStream, port: u16) {
+    let (reader, mut writer) = stream.into_split();
+    let mut buf = BufReader::new(reader);
+    let mut n = 0u64;
+
+    loop {
+        sleep(Duration::from_secs(1)).await;
+        let line = format!("Hello from producer {port} msg #{n}");
+        n += 1;
+
+        if custom_dmq::message::write_message(&mut writer, &Message::Pcm(line.into_bytes()))
+            .await
+            .is_err()
+        {
+            break;
+        }
+
+        match custom_dmq::message::read_message(&mut buf).await {
+            Ok(Message::RPcm(code)) => println!("[producer] R_PCM: {code}"),
+            Ok(other) => println!("[producer] Unexpected: {other:?}"),
+            Err(e) => {
+                eprintln!("[producer] Read error: {e}");
+                break;
+            }
+        }
+    }
+}
+
+async fn stdin_loop(stream: TcpStream) {
     let (reader, mut writer) = stream.into_split();
     let mut broker_buf = BufReader::new(reader);
     let mut stdin_buf = BufReader::new(tokio::io::stdin());
-
     let mut input = String::new();
-    let mut response = String::new();
 
-    println!(
-        "[producer:{}] Ready — typing sends to topic '{}'. Ctrl+C to quit.",
-        producer_id, topic
-    );
+    println!("[producer] Ready — type a line to send PCM. Ctrl+C to quit.");
 
     loop {
         input.clear();
-
         match stdin_buf.read_line(&mut input).await {
-            Ok(0) => {
-                println!("[producer:{}] EOF — shutting down.", producer_id);
-                break;
-            }
+            Ok(0) => break,
             Ok(_) => {
                 let msg = input.trim();
                 if msg.is_empty() {
                     continue;
                 }
-
-                // Send as PRODUCE <payload> — broker strips prefix, stores raw bytes
-                let outgoing = format!("PRODUCE {}\n", msg);
-                if writer.write_all(outgoing.as_bytes()).await.is_err() {
-                    eprintln!("[producer:{}] Lost connection to broker.", producer_id);
+                if custom_dmq::message::write_message(
+                    &mut writer,
+                    &Message::Pcm(msg.as_bytes().to_vec()),
+                )
+                .await
+                .is_err()
+                {
                     break;
                 }
-                println!("[producer:{}] Sent: PRODUCE {}", producer_id, msg);
-
-                // Read offset confirmation: "OK offset N"
-                response.clear();
-                match broker_buf.read_line(&mut response).await {
-                    Ok(0) => {
-                        println!("[producer:{}] Broker closed connection.", producer_id);
-                        break;
-                    }
-                    Ok(_) => {
-                        println!("[producer:{}] Broker: {}", producer_id, response.trim());
-                    }
-                    Err(e) => {
-                        eprintln!("[producer:{}] Read error: {}", producer_id, e);
-                        break;
-                    }
+                match custom_dmq::message::read_message(&mut broker_buf).await {
+                    Ok(Message::RPcm(code)) => println!("[producer] R_PCM: {code}"),
+                    Ok(other) => println!("[producer] {other:?}"),
+                    Err(_) => break,
                 }
             }
-            Err(e) => {
-                eprintln!("[producer:{}] Stdin error: {}", producer_id, e);
-                break;
-            }
+            Err(_) => break,
         }
     }
 }
