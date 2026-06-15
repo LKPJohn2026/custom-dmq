@@ -3,5 +3,7 @@
 pub mod broker;
 pub mod cgroup;
 pub mod message;
+pub mod metadata;
+pub mod mmap_queue;
 pub mod partition;
 pub mod topic;

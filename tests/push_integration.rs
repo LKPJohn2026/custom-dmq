@@ -190,7 +190,7 @@ async fn handle_registration(socket: TcpStream, broker: Arc<Mutex<Broker>>) {
             let port = reg.port;
             {
                 let mut b = broker.lock().await;
-                b.register_producer(&reg);
+                b.register_producer(&reg).unwrap();
             }
             tokio::spawn(dial_producer(port, topic_id, Arc::clone(&broker)));
             Message::RProducerRegister(0)
@@ -201,7 +201,7 @@ async fn handle_registration(socket: TcpStream, broker: Arc<Mutex<Broker>>) {
             let port = reg.port;
             let partition_idx = {
                 let mut b = broker.lock().await;
-                b.register_consumer(&reg)
+                b.register_consumer(&reg).unwrap()
             };
             tokio::spawn(dial_consumer(
                 port,
@@ -232,7 +232,7 @@ async fn dial_producer(port: u16, topic_id: u16, broker: Arc<Mutex<Broker>>) {
         };
         let (code, _) = {
             let mut b = broker.lock().await;
-            b.produce_pcm(topic_id, &payload)
+            b.produce_pcm(topic_id, &payload).unwrap()
         };
         if message::write_message(&mut writer, &Message::RPcm(code))
             .await

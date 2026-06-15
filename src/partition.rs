@@ -1,22 +1,23 @@
-//! Per-group partition with its own message queue.
+//! Per-group partition with a memory-mapped message queue.
 
-use crate::topic::Queue;
+use crate::mmap_queue::MmapQueue;
+use std::io;
+use std::path::Path;
 
 pub struct Partition {
-    pub queue: Queue,
-}
-
-impl Default for Partition {
-    fn default() -> Self {
-        Self::new()
-    }
+    pub queue: MmapQueue,
 }
 
 impl Partition {
-    pub fn new() -> Self {
-        Partition {
-            queue: Queue::new(),
-        }
+    pub fn open(
+        data_dir: &Path,
+        topic_id: u16,
+        group_id: u16,
+        partition_id: u16,
+    ) -> io::Result<Self> {
+        Ok(Partition {
+            queue: MmapQueue::open(data_dir, topic_id, group_id, partition_id)?,
+        })
     }
 
     pub fn append(&mut self, payload: &[u8]) -> u64 {
@@ -32,17 +33,19 @@ impl Partition {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.queue.is_empty()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn append_and_pop_preserves_order() {
-        let mut p = Partition::new();
+        let dir = tempdir().unwrap();
+        let mut p = Partition::open(dir.path(), 1, 1, 1).unwrap();
         p.append(b"a");
         p.append(b"b");
         assert_eq!(p.pop_front().unwrap(), b"a");

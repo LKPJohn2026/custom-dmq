@@ -1,6 +1,9 @@
 //! Consumer group with partition queues.
 
+use crate::metadata::store_cgroup_partition_count;
 use crate::partition::Partition;
+use std::io;
+use std::path::Path;
 
 pub struct ConsumerGroup {
     pub group_id: u16,
@@ -9,21 +12,49 @@ pub struct ConsumerGroup {
 }
 
 impl ConsumerGroup {
-    pub fn new(group_id: u16) -> Self {
-        ConsumerGroup {
-            group_id,
-            partitions: vec![Partition::new()],
-            consumer_count: 0,
+    pub fn load(data_dir: &Path, topic_id: u16, group_id: u16) -> io::Result<Self> {
+        let count = crate::metadata::load_cgroup_partition_count(data_dir, topic_id, group_id)?;
+        let partition_count = count.max(1);
+        let mut partitions = Vec::with_capacity(partition_count as usize);
+        for i in 0..partition_count {
+            let partition_id = i as u16 + 1;
+            partitions.push(Partition::open(data_dir, topic_id, group_id, partition_id)?);
         }
+        Ok(ConsumerGroup {
+            group_id,
+            partitions,
+            consumer_count: partition_count,
+        })
+    }
+
+    pub fn create_new(data_dir: &Path, topic_id: u16, group_id: u16) -> io::Result<Self> {
+        store_cgroup_partition_count(data_dir, topic_id, group_id, 1)?;
+        Ok(ConsumerGroup {
+            group_id,
+            partitions: vec![Partition::open(data_dir, topic_id, group_id, 1)?],
+            consumer_count: 0,
+        })
     }
 
     /// Assign a partition index for a newly registered consumer connection.
-    pub fn assign_partition(&mut self) -> u16 {
+    pub fn assign_partition(&mut self, data_dir: &Path, topic_id: u16) -> io::Result<u16> {
         self.consumer_count += 1;
         if self.partitions.len() < self.consumer_count as usize {
-            self.partitions.push(Partition::new());
+            let partition_id = self.partitions.len() as u16 + 1;
+            self.partitions.push(Partition::open(
+                data_dir,
+                topic_id,
+                self.group_id,
+                partition_id,
+            )?);
+            store_cgroup_partition_count(
+                data_dir,
+                topic_id,
+                self.group_id,
+                self.partitions.len() as u32,
+            )?;
         }
-        (self.partitions.len() - 1) as u16
+        Ok((self.partitions.len() - 1) as u16)
     }
 
     /// Index of the partition with the fewest buffered messages.
@@ -45,25 +76,31 @@ impl ConsumerGroup {
 mod tests {
     use super::*;
     use crate::partition::Partition;
+    use tempfile::tempdir;
 
     #[test]
     fn new_group_has_one_partition() {
-        let group = ConsumerGroup::new(1);
+        let dir = tempdir().unwrap();
+        let group = ConsumerGroup::create_new(dir.path(), 1, 1).unwrap();
         assert_eq!(group.partitions.len(), 1);
     }
 
     #[test]
     fn assign_partition_grows_with_consumers() {
-        let mut group = ConsumerGroup::new(1);
-        assert_eq!(group.assign_partition(), 0);
-        assert_eq!(group.assign_partition(), 1);
+        let dir = tempdir().unwrap();
+        let mut group = ConsumerGroup::create_new(dir.path(), 1, 1).unwrap();
+        assert_eq!(group.assign_partition(dir.path(), 1).unwrap(), 0);
+        assert_eq!(group.assign_partition(dir.path(), 1).unwrap(), 1);
         assert_eq!(group.partitions.len(), 2);
     }
 
     #[test]
     fn smallest_partition_picks_shortest_queue() {
-        let mut group = ConsumerGroup::new(1);
-        group.partitions.push(Partition::new());
+        let dir = tempdir().unwrap();
+        let mut group = ConsumerGroup::create_new(dir.path(), 1, 1).unwrap();
+        group
+            .partitions
+            .push(Partition::open(dir.path(), 1, 1, 2).unwrap());
         group.partitions[0].append(b"a");
         group.partitions[0].append(b"b");
         assert_eq!(group.smallest_partition_index(), 1);

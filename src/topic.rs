@@ -1,14 +1,16 @@
-//! Append-only ring buffer per topic with monotonic offsets.
-//!
-//! Each topic keeps a staging queue for messages produced before any consumer
-//! group exists. Once groups are registered, incoming messages are routed into
-//! per-group partitions.
+//! Topic staging queue and consumer groups.
 
 use crate::cgroup::ConsumerGroup;
+use crate::metadata::store_topic_groups;
+use crate::mmap_queue::{MmapQueue, STAGING_GROUP_ID, STAGING_PARTITION_ID};
+use crate::partition::Partition;
+use std::io;
+use std::path::{Path, PathBuf};
 
 pub const MAX_MSG_SIZE: usize = 255;
 pub const QUEUE_CAPACITY: usize = 10_000;
 
+/// In-memory ring buffer used by unit tests for offset semantics.
 pub struct Queue {
     buffer: Box<[u8]>,
     sizes: Box<[u8]>,
@@ -74,7 +76,6 @@ impl Queue {
         self.next_offset.saturating_sub(self.base_offset)
     }
 
-    /// Remove and return the oldest message in the ring.
     pub fn pop_front(&mut self) -> Option<Vec<u8>> {
         if self.base_offset >= self.next_offset {
             return None;
@@ -92,35 +93,59 @@ impl Queue {
 
 pub struct Topic {
     pub topic_id: u16,
-    pub staging: Queue,
+    pub staging: MmapQueue,
     pub cgroups: Vec<ConsumerGroup>,
+    data_dir: PathBuf,
 }
 
 impl Topic {
-    pub fn new(topic_id: u16) -> Self {
-        Topic {
-            topic_id,
-            staging: Queue::new(),
-            cgroups: Vec::new(),
+    pub fn load(data_dir: &Path, topic_id: u16) -> io::Result<Self> {
+        let staging = MmapQueue::open(data_dir, topic_id, STAGING_GROUP_ID, STAGING_PARTITION_ID)?;
+        let group_ids = crate::metadata::load_topic_groups(data_dir, topic_id)?;
+        let mut cgroups = Vec::with_capacity(group_ids.len());
+        for group_id in group_ids {
+            cgroups.push(ConsumerGroup::load(data_dir, topic_id, group_id)?);
         }
+        Ok(Topic {
+            topic_id,
+            staging,
+            cgroups,
+            data_dir: data_dir.to_path_buf(),
+        })
+    }
+
+    pub fn create(data_dir: &Path, topic_id: u16) -> io::Result<Self> {
+        Ok(Topic {
+            topic_id,
+            staging: MmapQueue::open(data_dir, topic_id, STAGING_GROUP_ID, STAGING_PARTITION_ID)?,
+            cgroups: Vec::new(),
+            data_dir: data_dir.to_path_buf(),
+        })
     }
 
     pub fn append_to_staging(&mut self, payload: &[u8]) -> u64 {
         self.staging.append(payload)
     }
 
-    pub fn drain_staging_into(&mut self, partition: &mut crate::partition::Partition) {
+    pub fn drain_staging_into(&mut self, partition: &mut Partition) {
         while let Some(msg) = self.staging.pop_front() {
             partition.append(&msg);
         }
     }
 
-    pub fn find_or_create_group(&mut self, group_id: u16) -> bool {
+    pub fn find_or_create_group(&mut self, group_id: u16) -> io::Result<bool> {
         if self.cgroups.iter().any(|g| g.group_id == group_id) {
-            return false;
+            return Ok(false);
         }
-        self.cgroups.push(ConsumerGroup::new(group_id));
-        true
+        let group = ConsumerGroup::create_new(&self.data_dir, self.topic_id, group_id)?;
+        self.cgroups.push(group);
+        self.persist_groups()?;
+        Ok(true)
+    }
+
+    pub fn persist_groups(&self) -> io::Result<()> {
+        let group_ids: Vec<u16> = self.cgroups.iter().map(|g| g.group_id).collect();
+        store_topic_groups(&self.data_dir, self.topic_id, &group_ids)
     }
 
     pub fn group(&self, group_id: u16) -> Option<&ConsumerGroup> {

@@ -3,7 +3,7 @@
 mod consumer_client;
 mod producer;
 
-use custom_dmq::broker::{broker_port, run_consumer_ready_and_send, Broker};
+use custom_dmq::broker::{broker_port, data_dir_from_env, run_consumer_ready_and_send, Broker};
 use custom_dmq::message::Message;
 use std::sync::Arc;
 use tokio::io::BufReader;
@@ -70,7 +70,9 @@ async fn run_server() {
     let listener = TcpListener::bind(&addr).await.unwrap();
     println!("[broker] Listening on {addr}");
 
-    let broker: SharedBroker = Arc::new(Mutex::new(Broker::new()));
+    let broker: SharedBroker = Arc::new(Mutex::new(
+        Broker::open(data_dir_from_env()).expect("failed to open broker data dir"),
+    ));
 
     loop {
         match listener.accept().await {
@@ -109,7 +111,10 @@ async fn handle_broker_connection(socket: TcpStream, broker: SharedBroker) {
             let port = reg.port;
             {
                 let mut b = broker.lock().await;
-                b.register_producer(reg);
+                if b.register_producer(reg).is_err() {
+                    eprintln!("[broker] Failed to register producer");
+                    return;
+                }
             }
             tokio::spawn(dial_back_to_producer(port, topic_id, Arc::clone(&broker)));
             Message::RProducerRegister(0)
@@ -120,7 +125,13 @@ async fn handle_broker_connection(socket: TcpStream, broker: SharedBroker) {
             let port = reg.port;
             let partition_idx = {
                 let mut b = broker.lock().await;
-                b.register_consumer(reg)
+                match b.register_consumer(reg) {
+                    Ok(idx) => idx,
+                    Err(e) => {
+                        eprintln!("[broker] Failed to register consumer: {e}");
+                        return;
+                    }
+                }
             };
             tokio::spawn(dial_back_to_consumer(
                 port,
@@ -167,7 +178,13 @@ async fn dial_back_to_producer(port: u16, topic_id: u16, broker: SharedBroker) {
             Ok(Message::Pcm(payload)) => {
                 let (code, offset) = {
                     let mut b = broker.lock().await;
-                    b.produce_pcm(topic_id, &payload)
+                    match b.produce_pcm(topic_id, &payload) {
+                        Ok(result) => result,
+                        Err(e) => {
+                            eprintln!("[broker←producer] produce failed: {e}");
+                            break;
+                        }
+                    }
                 };
                 println!(
                     "[broker←producer] topic={topic_id} offset={offset} len={}",
