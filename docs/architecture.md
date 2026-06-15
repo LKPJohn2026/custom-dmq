@@ -43,17 +43,18 @@ sequenceDiagram
 | Area | Before | Now |
 |------|--------|-----|
 | Wire format | Newline text (`REGISTER_PRODUCER`, `CONSUME`) | Binary `P_REG` / `C_REG` / `PCM` frames |
-| Consumer API | Pull via `CONSUME` on broker port | Push on dial-back connection |
+| Consumer flow | Pull via `CONSUME` on broker port | R_PCM ready handshake on dial-back connection |
+| Delivery | Broker push loop to ready consumers | Consumer sends R_PCM, broker responds with PCM |
+| Storage | Single topic queue | Staging queue + per-group partition queues |
 | Topic key | String name | `u16` topic id |
-| Groups | Flat `HashMap` on broker | `ConsumerGroup` list per topic |
+| Groups | Flat `HashMap` on broker | `ConsumerGroup` with partition vectors per topic |
 | Entry point | Single binary with embedded producer | `server` / `producer` / `consumer` CLI |
-| Offsets | Per-group string keys | Per-group `u64` into shared topic log |
 
 ## Design notes
 
-**Push vs pull.** Consumers no longer poll the broker. A background task per group reads at the group offset and writes PCM to a ready consumer; the offset advances after `R_PCM`.
+**Ready-initiated delivery.** Consumers send `R_PCM` when they want the next message. The broker pops from the consumer's assigned partition and replies with `PCM`.
 
-**Non-destructive log.** `read_at(offset)` leaves records in place so independent groups can read the same topic at different positions. Retention is bounded by the ring buffer capacity.
+**Staging and partitions.** Messages buffer in a topic staging queue until a consumer group registers. Each group owns one or more partitions; producers route new messages to the shortest partition per group.
 
 **Dial-back registration.** Producers and consumers bind a local port, register with the broker, then accept an outbound connection from the broker for PCM traffic.
 
@@ -62,7 +63,8 @@ sequenceDiagram
 | Module | Role |
 |--------|------|
 | `message.rs` | Binary encode/decode |
-| `topic.rs` | Ring-buffer log + topic consumer groups |
+| `partition.rs` | Per-group partition queues |
+| `topic.rs` | Staging queue + consumer groups |
 | `cgroup.rs` | Group offset, consumer handles |
 | `broker.rs` | Topic registry, produce, push delivery loop |
 | `producer.rs` | Producer client |

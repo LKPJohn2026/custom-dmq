@@ -3,4 +3,5 @@
 pub mod broker;
 pub mod cgroup;
 pub mod message;
+pub mod partition;
 pub mod topic;

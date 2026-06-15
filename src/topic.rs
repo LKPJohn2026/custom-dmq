@@ -1,8 +1,8 @@
 //! Append-only ring buffer per topic with monotonic offsets.
 //!
-//! Topics are keyed by `u16` id (was string name). Each topic now owns a
-//! `cgroups` list so every consumer group tracks its own read offset into
-//! the shared log without deleting records on delivery.
+//! Each topic keeps a staging queue for messages produced before any consumer
+//! group exists. Once groups are registered, incoming messages are routed into
+//! per-group partitions.
 
 use crate::cgroup::ConsumerGroup;
 
@@ -70,6 +70,21 @@ impl Queue {
         Some(&self.buffer[start..start + len])
     }
 
+    pub fn live_len(&self) -> u64 {
+        self.next_offset.saturating_sub(self.base_offset)
+    }
+
+    /// Remove and return the oldest message in the ring.
+    pub fn pop_front(&mut self) -> Option<Vec<u8>> {
+        if self.base_offset >= self.next_offset {
+            return None;
+        }
+        let bytes = self.read_at(self.base_offset)?.to_vec();
+        self.head = (self.head + 1) % QUEUE_CAPACITY;
+        self.base_offset += 1;
+        Some(bytes)
+    }
+
     pub fn next_offset(&self) -> u64 {
         self.next_offset
     }
@@ -77,7 +92,7 @@ impl Queue {
 
 pub struct Topic {
     pub topic_id: u16,
-    pub queue: Queue,
+    pub staging: Queue,
     pub cgroups: Vec<ConsumerGroup>,
 }
 
@@ -85,21 +100,19 @@ impl Topic {
     pub fn new(topic_id: u16) -> Self {
         Topic {
             topic_id,
-            queue: Queue::new(),
+            staging: Queue::new(),
             cgroups: Vec::new(),
         }
     }
 
-    pub fn append(&mut self, payload: &[u8]) -> u64 {
-        self.queue.append(payload)
+    pub fn append_to_staging(&mut self, payload: &[u8]) -> u64 {
+        self.staging.append(payload)
     }
 
-    pub fn read_at(&self, offset: u64) -> Option<&[u8]> {
-        self.queue.read_at(offset)
-    }
-
-    pub fn next_offset(&self) -> u64 {
-        self.queue.next_offset()
+    pub fn drain_staging_into(&mut self, partition: &mut crate::partition::Partition) {
+        while let Some(msg) = self.staging.pop_front() {
+            partition.append(&msg);
+        }
     }
 
     pub fn find_or_create_group(&mut self, group_id: u16) -> bool {
@@ -132,21 +145,12 @@ mod tests {
     }
 
     #[test]
-    fn test_read_at_returns_correct_payload() {
+    fn test_pop_front_fifo() {
         let mut q = Queue::new();
-        q.append(b"hello");
-        q.append(b"world");
-        assert_eq!(q.read_at(0).unwrap(), b"hello");
-        assert_eq!(q.read_at(1).unwrap(), b"world");
-    }
-
-    #[test]
-    fn test_messages_non_destructive() {
-        let mut q = Queue::new();
-        q.append(b"persistent");
-        q.read_at(0);
-        q.read_at(0);
-        assert_eq!(q.read_at(0).unwrap(), b"persistent");
+        q.append(b"first");
+        q.append(b"second");
+        assert_eq!(q.pop_front().unwrap(), b"first");
+        assert_eq!(q.pop_front().unwrap(), b"second");
     }
 
     #[test]
@@ -159,17 +163,5 @@ mod tests {
         q.append(b"overflow");
         assert!(q.read_at(0).is_none());
         assert!(q.read_at(1).is_some());
-    }
-
-    #[test]
-    fn test_two_groups_on_topic_are_independent() {
-        let mut topic = Topic::new(1);
-        topic.append(b"m1");
-        topic.find_or_create_group(1);
-        topic.find_or_create_group(2);
-        let g1 = topic.group(1).unwrap().offset;
-        let g2 = topic.group(2).unwrap().offset;
-        assert_eq!(topic.read_at(g1).unwrap(), b"m1");
-        assert_eq!(topic.read_at(g2).unwrap(), b"m1");
     }
 }
