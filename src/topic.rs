@@ -102,12 +102,16 @@ impl Topic {
         self.queue.next_offset()
     }
 
-    pub fn find_or_create_group(&mut self, group_id: u16) -> (bool, usize) {
-        if let Some(idx) = self.cgroups.iter().position(|g| g.group_id == group_id) {
-            return (false, idx);
+    pub fn find_or_create_group(&mut self, group_id: u16) -> bool {
+        if self.cgroups.iter().any(|g| g.group_id == group_id) {
+            return false;
         }
         self.cgroups.push(ConsumerGroup::new(group_id));
-        (true, self.cgroups.len() - 1)
+        true
+    }
+
+    pub fn group(&self, group_id: u16) -> Option<&ConsumerGroup> {
+        self.cgroups.iter().find(|g| g.group_id == group_id)
     }
 
     pub fn group_mut(&mut self, group_id: u16) -> Option<&mut ConsumerGroup> {
@@ -161,11 +165,11 @@ mod tests {
     fn test_two_groups_on_topic_are_independent() {
         let mut topic = Topic::new(1);
         topic.append(b"m1");
-        let (_, g1) = topic.find_or_create_group(1);
-        let (_, g2) = topic.find_or_create_group(2);
-        topic.cgroups[g1].offset = 0;
-        topic.cgroups[g2].offset = 0;
-        assert_eq!(topic.read_at(topic.cgroups[g1].offset).unwrap(), b"m1");
-        assert_eq!(topic.read_at(topic.cgroups[g2].offset).unwrap(), b"m1");
+        topic.find_or_create_group(1);
+        topic.find_or_create_group(2);
+        let g1 = topic.group(1).unwrap().offset;
+        let g2 = topic.group(2).unwrap().offset;
+        assert_eq!(topic.read_at(g1).unwrap(), b"m1");
+        assert_eq!(topic.read_at(g2).unwrap(), b"m1");
     }
 }

@@ -1,18 +1,16 @@
-//! Broker state and push-based consumer group delivery.
+//! Broker state and consumer delivery.
 //!
-//! Replaces the prior text-protocol broker and pull-style `CONSUME` handler.
 //! Producers and consumers register over binary frames; the broker dials back
-//! on the client port and receives PCM on that persistent connection.
-//! Each consumer group tracks its own offset into the shared topic log; the
-//! group delivery loop pushes the next message to a ready consumer and
-//! advances the offset after an R_PCM ack.
+//! on the client port. Consumers signal readiness with R_PCM; the broker then
+//! reads at the group offset and pushes the next PCM frame.
 
-use crate::cgroup::{ConsumerHandle, PushRequest};
-use crate::message::{ConsumerRegister, ProducerRegister};
+use crate::message::{self, ConsumerRegister, Message, ProducerRegister};
 use crate::topic::Topic;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::io::{AsyncRead, AsyncWrite, BufReader};
 use tokio::sync::Mutex;
+use tokio::time::{sleep, Duration};
 
 pub const BROKER_PORT: u16 = 7777;
 
@@ -63,25 +61,15 @@ impl Broker {
         0
     }
 
-    pub fn register_consumer(&mut self, reg: &ConsumerRegister) -> (u8, bool, u16) {
+    pub fn register_consumer(&mut self, reg: &ConsumerRegister) -> u8 {
         let topic = self.topic_mut(reg.topic_id);
-        let (is_new_group, _idx) = topic.find_or_create_group(reg.group_id);
-        (0, is_new_group, reg.topic_id)
+        topic.find_or_create_group(reg.group_id);
+        0
     }
 
     pub fn produce_pcm(&mut self, topic_id: u16, payload: &[u8]) -> (u8, u64) {
         let offset = self.topic_mut(topic_id).append(payload);
         (0, offset)
-    }
-
-    pub fn add_consumer_handle(&mut self, topic_id: u16, group_id: u16, handle: ConsumerHandle) {
-        if let Some(group) = self
-            .topics
-            .get_mut(&topic_id)
-            .and_then(|t| t.group_mut(group_id))
-        {
-            group.add_consumer(handle);
-        }
     }
 
     pub fn topic_ids_with_groups(&self) -> Vec<(u16, Vec<u16>)> {
@@ -102,8 +90,8 @@ impl Broker {
             Some(t) => t,
             None => return false,
         };
-        let (_, _) = topic.find_or_create_group(group_id);
-        let offset = topic.group_mut(group_id).unwrap().offset;
+        topic.find_or_create_group(group_id);
+        let offset = topic.group(group_id).unwrap().offset;
         let payload = topic.read_at(offset).map(|bytes| bytes.to_vec());
         match payload {
             None => {
@@ -119,70 +107,62 @@ impl Broker {
     }
 }
 
-/// Background task: read at the group offset and push PCM to a ready consumer.
-pub async fn run_consumer_group_delivery(broker: Arc<Mutex<Broker>>, topic_id: u16, group_id: u16) {
-    println!("[broker] Starting push delivery for topic={topic_id} group={group_id}");
-
+/// Per-consumer task: wait for R_PCM ready, deliver next group message, advance offset.
+pub async fn run_consumer_ready_and_send<R, W>(
+    broker: Arc<Mutex<Broker>>,
+    topic_id: u16,
+    group_id: u16,
+    reader: &mut BufReader<R>,
+    writer: &mut W,
+) where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
     loop {
-        let delivery = {
-            let mut guard = broker.lock().await;
-            let topic = match guard.topics.get_mut(&topic_id) {
-                Some(t) => t,
-                None => {
-                    drop(guard);
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                    continue;
-                }
+        match message::read_message(reader).await {
+            Ok(Message::RPcm(_)) => {}
+            Ok(other) => {
+                eprintln!("[broker→consumer] Expected R_PCM, got {other:?}");
+                break;
+            }
+            Err(e) => {
+                eprintln!("[broker→consumer] Read error: {e}");
+                break;
+            }
+        }
+
+        let payload = loop {
+            let data = {
+                let guard = broker.lock().await;
+                guard.topics.get(&topic_id).and_then(|t| {
+                    let offset = t.group(group_id)?.offset;
+                    t.read_at(offset).map(|p| p.to_vec())
+                })
             };
-            if topic.group_mut(group_id).is_none() {
-                drop(guard);
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                continue;
+            if let Some(p) = data {
+                break p;
             }
-
-            let offset = topic.group_mut(group_id).unwrap().offset;
-            let payload = topic.read_at(offset).map(|p| p.to_vec());
-            let push_tx = topic
-                .group_mut(group_id)
-                .unwrap()
-                .find_ready_consumer()
-                .map(|c| c.push_tx.clone());
-
-            (payload, push_tx, offset)
+            sleep(Duration::from_millis(10)).await;
         };
 
-        let (payload, push_tx, offset) = match delivery {
-            (Some(p), Some(tx), off) => (p, tx, off),
-            _ => {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                continue;
-            }
-        };
-
-        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
-        if push_tx
-            .send(PushRequest {
-                payload,
-                ack: ack_tx,
-            })
+        if message::write_message(writer, &Message::Pcm(payload))
             .await
             .is_err()
         {
-            continue;
+            break;
         }
 
-        if ack_rx.await.is_ok() {
-            let mut guard = broker.lock().await;
-            if let Some(group) = guard
-                .topics
-                .get_mut(&topic_id)
-                .and_then(|t| t.group_mut(group_id))
-            {
-                if group.offset == offset {
-                    group.offset += 1;
-                }
-            }
-            println!("[broker] Delivered offset {offset} to group {group_id} on topic {topic_id}");
+        let mut guard = broker.lock().await;
+        if let Some(group) = guard
+            .topics
+            .get_mut(&topic_id)
+            .and_then(|t| t.group_mut(group_id))
+        {
+            group.offset += 1;
+            println!(
+                "[broker] Delivered offset {} to group {group_id} on topic {topic_id}",
+                group.offset - 1
+            );
         }
     }
 }
