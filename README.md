@@ -1,25 +1,164 @@
 # custom-dmq
 
-Kafka-inspired distributed message queue in Rust. Design notes: [docs/architecture.md](docs/architecture.md).
+> A Kafka-inspired message queue in Rust (Tokio): **MySQL-first writes** → **Debezium**
+> → **Kafka** → **cache invalidation**.
+>
+> *(No — just kidding.)* This repo is a small educational **distributed message queue**
+> that borrows Kafka’s mental model (topics, consumer groups) while keeping the system
+> simple enough to run on one machine.
 
-**Status:** push-based consumer groups with binary wire protocol.
+Design notes: [`docs/architecture.md`](docs/architecture.md).
+
+---
+
+## Architecture
+
+```text
+┌──────────────────────────────────────────────────────────────────────────┐
+│                                local host                                 │
+│                                                                          │
+│  producer (bind :P)                                                      │
+│     │  P_REG(topic_id, port=P)                                           │
+│     ▼                                                                    │
+│  broker (TCP :7777) ────── dials back ──────▶ producer (TCP :P)          │
+│     │                                                          │        │
+│     │                           PCM(payload)                   │        │
+│     │◀─────────────────────────────────────────────────────────┘        │
+│     │  route: topic staging → per-group partitions                       │
+│     ▼                                                                    │
+│  consumer (bind :C)                                                      │
+│     │  C_REG(topic_id, group_id, port=C)                                 │
+│     ▼                                                                    │
+│  broker (TCP :7777) ────── dials back ──────▶ consumer (TCP :C)          │
+│                                              │                           │
+│                                              │  R_PCM (ready)            │
+│                                              ▼                           │
+│                                           broker sends PCM               │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+### Key capabilities
+
+| Area | What it does |
+|------|--------------|
+| **Broker** | Accepts registration requests on `DMQ_BROKER_PORT` (default `7777`), manages topics / groups / partitions. |
+| **Binary protocol** | Length-prefixed frames: `ECHO`, `P_REG`, `C_REG`, `PCM`, `R_*` (see `src/message.rs`). |
+| **Dial-back pattern** | Producer/consumer bind a port, register, then accept an outbound connection from the broker. |
+| **Consumer groups** | Groups exist per-topic; each consumer registration gets a partition index. |
+| **Partitioned storage** | Per-group partitions (course model): messages route to the shortest partition per group. |
+| **Persistence (mmap)** | Queue contents + metadata are stored under `DMQ_DATA_DIR` using mmap files; survives broker restart. |
+| **Tests** | Unit tests for queue/metadata invariants + integration tests for TCP delivery + persistence recovery. |
+
+### Consistency model
+
+This system is **eventually consistent** with respect to consumers:
+
+- Producers write to the broker over the dial-back connection.
+- Consumers receive messages when they send `R_PCM` (ready) on their dial-back connection.
+- If a consumer is slow or disconnected, its partition buffers until it catches up (bounded by queue capacity).
+
+---
+
+## Tech stack
+
+| Layer | Choice |
+|------|--------|
+| Runtime | Rust 2021 + Tokio |
+| Persistence | `memmap2` + small metadata files |
+| CI | GitHub Actions: fmt → clippy → test → release build |
+
+---
+
+## Prerequisites
+
+- Rust toolchain (stable)
+
+---
 
 ## Quick start
 
+### Start the broker
+
 ```bash
 cargo run -- server
+```
+
+### Start a consumer (group 1, topic 1)
+
+```bash
 cargo run -- consumer 7779 1 1    # port, topic_id, group_id
+```
+
+### Start a producer (topic 1)
+
+```bash
 cargo run -- producer 7778 1 --simulate
 ```
 
-## Development
+---
+
+## Configuration
+
+All config is via env vars:
+
+| Variable | Default | Purpose |
+|---------|---------|---------|
+| `DMQ_BROKER_PORT` | `7777` | Broker registration port |
+| `DMQ_DATA_DIR` | `dmq-data` | Persistence directory for mmap + metadata |
+
+---
+
+## Running the tests
 
 ```bash
 cargo test
+```
+
+### Development commands
+
+```bash
 cargo fmt --all
 cargo clippy --all-targets -- -D warnings
 ```
 
-## CI
+---
 
-Pull requests run Rustfmt, Clippy, unit tests, integration tests, and a release build via GitHub Actions.
+## Continuous integration
+
+GitHub Actions workflow: [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
+
+- Rustfmt (`cargo fmt --check`)
+- Clippy (`cargo clippy -D warnings`)
+- Tests (`cargo test`)
+- Release build (`cargo build --release`)
+
+---
+
+## Project structure
+
+```text
+custom-dmq/
+├── src/
+│   ├── broker.rs                 broker state + routing + delivery loop
+│   ├── message.rs                binary wire protocol
+│   ├── topic.rs                  topic staging queue + group registry
+│   ├── cgroup.rs                 consumer groups + partition assignment
+│   ├── partition.rs              per-group partition backed by mmap queue
+│   ├── mmap_queue.rs             mmap ring buffer + per-queue metadata
+│   └── metadata.rs               broker/topic/group metadata tables
+├── tests/
+│   ├── push_integration.rs       TCP dial-back + ready-initiated delivery
+│   ├── partition_integration.rs  partition assignment + routing
+│   └── persistence_integration.rs restart recovery
+└── docs/
+    └── architecture.md           deeper design notes
+```
+
+---
+
+## Extending
+
+- Add retention/backpressure knobs (queue capacity, eviction policy).
+- Add admin API for listing topics / groups.
+- Replace dial-back with a single long-lived client→broker socket (Kafka-like).
+
