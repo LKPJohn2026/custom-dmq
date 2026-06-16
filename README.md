@@ -45,7 +45,7 @@ Design notes: [`docs/architecture.md`](docs/architecture.md).
 | **Binary protocol** | Length-prefixed frames: `ECHO`, `P_REG`, `C_REG`, `PCM`, `R_*` (see `src/message.rs`). |
 | **Dial-back pattern** | Producer/consumer bind a port, register, then accept an outbound connection from the broker. |
 | **Consumer groups** | Groups exist per-topic; each consumer registration gets a partition index. |
-| **Partitioned storage** | Per-group partitions (course model): messages route to the shortest partition per group. |
+| **Partitioned storage** | Per-group partitions: messages route to the shortest partition per group for simple parallelism. |
 | **Persistence (mmap)** | Queue contents + metadata are stored under `DMQ_DATA_DIR` using mmap files; survives broker restart. |
 | **Tests** | Unit tests for queue/metadata invariants + integration tests for TCP delivery + persistence recovery. |
 

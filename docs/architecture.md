@@ -61,9 +61,9 @@ sequenceDiagram
 ## Differentiation from Apache Kafka
 
 `custom-dmq` borrows Kafka’s **vocabulary** (topics, consumer groups, partitions) but
-implements a **course-style broker** for networking, storage layout, and delivery. The
-differences are intentional: they keep the project small enough to build incrementally
-while still teaching distributed-messaging concepts.
+implements a **local-first broker** for networking, storage layout, and delivery. The
+differences are intentional: they keep the system small enough to run and maintain on
+one machine while still teaching distributed-messaging concepts.
 
 ### Comparison
 
@@ -72,11 +72,11 @@ while still teaching distributed-messaging concepts.
 | **Client connectivity** | Producers and consumers connect **to** the broker cluster. | Clients bind a local port; the broker **dials back** after `P_REG` / `C_REG`. | Dial-back makes registration and long-lived PCM streams easy to implement with Tokio on a single host. No service discovery or ingress rules required for a coursework demo. |
 | **Wire protocol** | Binary Kafka protocol (`Produce`, `Fetch`, `JoinGroup`, …). | Custom frames: `ECHO`, `P_REG`, `C_REG`, `PCM`, `R_*`. | Full Kafka protocol is large; a minimal typed frame set is enough to exercise encode/decode, registration, and message transport. |
 | **Consumer API** | **Pull**: consumer issues `Fetch` with partition + offset; broker returns batches. | **Ready-initiated**: consumer sends `R_PCM`; broker pops one message and replies with `PCM`. | Pull requires offset management, fetch sessions, and backpressure policies. `R_PCM` is a minimal “I’m ready for the next message” handshake that maps cleanly to async read/write loops. |
-| **Partition ownership** | Partitions belong to the **topic**. All consumer groups read the **same** partition logs. | Partitions belong to the **consumer group**. Each group has its own partition queues. | Course model: parallelism is scoped per group, not shared across groups. Simpler routing — produce fans out into every group’s shortest partition without coordinating a global partition assignment. |
+| **Partition ownership** | Partitions belong to the **topic**. All consumer groups read the **same** partition logs. | Partitions belong to the **consumer group**. Each group has its own partition queues. | Parallelism is scoped per group, not shared across groups. Routing stays simple — produce fans out into every group’s shortest partition without coordinating a global partition assignment. |
 | **Message fan-out** | One append to a partition; **each group** tracks its own offset into that shared log. | One produce **copies** the payload into each registered group’s partition queue. | Matches pub/sub semantics for independent groups on a small broker. Avoids offset vectors per group on a single shared log while groups are few and messages are small. |
 | **Log semantics** | **Append-only commit log**: records stay until retention/compaction; consumers advance offsets. | **Destructive queues**: `pop_front` removes the message from the mmap-backed partition queue. | Queue pop is simpler to reason about for staging drain and per-partition delivery. Replay, compaction, and “reset offset” are out of scope for the current milestone. |
 | **Offsets** | Durable, per `(group, topic, partition)`; committed to `__consumer_offsets`. | No durable consumer offset in the hot path; delivery position is implicit in each queue’s head/tail. | Offsets add coordinator logic and recovery rules. Head/tail in `partition_metadata_*.dat` is enough for persistence and restart without implementing a group coordinator. |
-| **Staging** | N/A (topics exist independently of consumers). | Topic **staging queue** (reserved ids `65535/65535`) buffers until the first group registers. | Course pattern for “produce before consume”: early messages are not dropped; they drain into partitions when a group appears. |
+| **Staging** | N/A (topics exist independently of consumers). | Topic **staging queue** (reserved ids `65535/65535`) buffers until the first group registers. | Simple “produce before consume”: early messages are not dropped; they drain into partitions when a group appears. |
 | **Scaling consumers** | More consumers in a group → rebalance **existing topic partitions** among members. | Second consumer in a group → **new partition** appended to that group. | Avoids rebalance protocol and partition assignment algorithms. Good for demonstrating “more consumers → more partition queues” without a group coordinator. |
 | **Persistence** | Segment files per topic-partition, replication to followers, ISR. | mmap files (`underArr_*`, `underSize_*`, `partition_metadata_*`) + small metadata tables under `DMQ_DATA_DIR`. | Single-node durability for restart recovery. No replication, leader election, or cross-broker consensus — appropriate for a local/educational broker. |
 | **Deployment** | Multi-broker cluster, ZooKeeper/KRaft metadata. | Single broker process (`cargo run -- server`). | One binary on one machine matches the project scope; cluster operations are a separate learning track. |
