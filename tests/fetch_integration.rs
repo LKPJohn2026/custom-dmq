@@ -58,7 +58,8 @@ async fn commit_persists_in_broker_memory() {
             topic_id: 1,
             partition_id: 0,
             offset: 123,
-        });
+        })
+        .unwrap();
         assert_eq!(b.committed_offset(9, 1, 0), Some(123));
     }
 }
@@ -101,7 +102,7 @@ async fn run_minimal_fetch_server(broker: Arc<Mutex<Broker>>, port: u16) {
                 Message::CommitOffset(req) => {
                     {
                         let mut b = broker.lock().await;
-                        b.commit_offset(&req);
+                        let _ = b.commit_offset(&req);
                     }
                     let _ = message::write_message(&mut writer, &Message::RCommitOffset(0)).await;
                 }

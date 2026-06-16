@@ -9,7 +9,7 @@
 use crate::message::{
     self, CommitOffsetRequest, ConsumerRegister, FetchRequest, Message, ProducerRegister,
 };
-use crate::metadata::store_broker_topics;
+use crate::metadata::{load_committed_offset, store_broker_topics, store_committed_offset};
 use crate::partition_log::{PartitionLog, Record};
 use crate::storage::{GroupId, PartitionIdx, Storage, TopicId};
 use crate::topic::Topic;
@@ -130,15 +130,40 @@ impl Broker {
         log.fetch(req.offset, req.max_bytes as usize).records
     }
 
-    pub fn commit_offset(&mut self, req: &CommitOffsetRequest) {
+    pub fn commit_offset(&mut self, req: &CommitOffsetRequest) -> io::Result<()> {
         self.committed_offsets
             .insert((req.group_id, req.topic_id, req.partition_id), req.offset);
+        store_committed_offset(
+            &self.data_dir,
+            req.group_id,
+            req.topic_id,
+            req.partition_id,
+            req.offset,
+        )?;
+        Ok(())
     }
 
     pub fn committed_offset(&self, group_id: u16, topic_id: u16, partition_id: u16) -> Option<u64> {
         self.committed_offsets
             .get(&(group_id, topic_id, partition_id))
             .copied()
+    }
+
+    pub fn load_committed_offset(
+        &mut self,
+        group_id: u16,
+        topic_id: u16,
+        partition_id: u16,
+    ) -> io::Result<Option<u64>> {
+        if let Some(v) = self.committed_offset(group_id, topic_id, partition_id) {
+            return Ok(Some(v));
+        }
+        let v = load_committed_offset(&self.data_dir, group_id, topic_id, partition_id)?;
+        if let Some(offset) = v {
+            self.committed_offsets
+                .insert((group_id, topic_id, partition_id), offset);
+        }
+        Ok(v)
     }
 
     pub fn process_echo(&self, text: &str) -> String {
@@ -515,12 +540,14 @@ mod tests {
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].payload, b"a".to_vec());
 
-        broker.commit_offset(&CommitOffsetRequest {
-            group_id: 7,
-            topic_id: 1,
-            partition_id: 0,
-            offset: 2,
-        });
+        broker
+            .commit_offset(&CommitOffsetRequest {
+                group_id: 7,
+                topic_id: 1,
+                partition_id: 0,
+                offset: 2,
+            })
+            .unwrap();
         assert_eq!(broker.committed_offset(7, 1, 0), Some(2));
     }
 }

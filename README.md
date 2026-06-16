@@ -48,6 +48,7 @@ Design notes: [`docs/architecture.md`](docs/architecture.md).
 | **Partitioned storage** | Per-group partitions: messages route to the shortest partition per group for simple parallelism. |
 | **Persistence (mmap)** | Queue contents + metadata are stored under `DMQ_DATA_DIR` using mmap files; survives broker restart. |
 | **Tests** | Unit tests for queue/metadata invariants + integration tests for TCP delivery + persistence recovery. |
+| **Pull-based API (Phase 1)** | `produce`/`fetch` commands use `PRODUCE` + `FETCH` + `COMMIT` on the broker port, backed by an append-only log. |
 
 ### Consistency model
 
@@ -93,6 +94,13 @@ cargo run -- consumer 7779 1 1    # port, topic_id, group_id
 
 ```bash
 cargo run -- producer 7778 1 --simulate
+```
+
+### Or use the pull-based path (no dial-back)
+
+```bash
+cargo run -- produce 1 --simulate
+cargo run -- fetch 1 1
 ```
 
 ---

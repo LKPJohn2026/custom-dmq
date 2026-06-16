@@ -15,6 +15,7 @@ pub const C_REG: u8 = 3;
 pub const PCM: u8 = 4;
 pub const FETCH: u8 = 5;
 pub const COMMIT: u8 = 6;
+pub const PRODUCE: u8 = 7;
 
 pub const R_ECHO: u8 = 101;
 pub const R_P_REG: u8 = 102;
@@ -22,6 +23,7 @@ pub const R_C_REG: u8 = 103;
 pub const R_PCM: u8 = 104;
 pub const R_FETCH: u8 = 105;
 pub const R_COMMIT: u8 = 106;
+pub const R_PRODUCE: u8 = 107;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProducerRegister {
@@ -53,6 +55,13 @@ pub struct CommitOffsetRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProduceRequest {
+    pub topic_id: u16,
+    pub partition_id: u16,
+    pub payload: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
     Echo(String),
     ProducerRegister(ProducerRegister),
@@ -60,12 +69,14 @@ pub enum Message {
     Pcm(Vec<u8>),
     Fetch(FetchRequest),
     CommitOffset(CommitOffsetRequest),
+    Produce(ProduceRequest),
     REcho(String),
     RProducerRegister(u8),
     RConsumerRegister(u8),
     RPcm(u8),
     RFetch(Vec<u8>),
     RCommitOffset(u8),
+    RProduce(u64),
 }
 
 impl ProducerRegister {
@@ -189,6 +200,30 @@ impl CommitOffsetRequest {
     }
 }
 
+impl ProduceRequest {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(4 + self.payload.len());
+        out.extend_from_slice(&self.topic_id.to_be_bytes());
+        out.extend_from_slice(&self.partition_id.to_be_bytes());
+        out.extend_from_slice(&self.payload);
+        out
+    }
+
+    pub fn decode(payload: &[u8]) -> io::Result<Self> {
+        if payload.len() < 4 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "PRODUCE payload too short",
+            ));
+        }
+        Ok(ProduceRequest {
+            topic_id: u16::from_be_bytes([payload[0], payload[1]]),
+            partition_id: u16::from_be_bytes([payload[2], payload[3]]),
+            payload: payload[4..].to_vec(),
+        })
+    }
+}
+
 pub fn parse_frame(body: &[u8]) -> io::Result<Message> {
     if body.is_empty() {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "empty frame"));
@@ -206,6 +241,7 @@ pub fn parse_frame(body: &[u8]) -> io::Result<Message> {
         PCM => Ok(Message::Pcm(payload.to_vec())),
         FETCH => Ok(Message::Fetch(FetchRequest::decode(payload)?)),
         COMMIT => Ok(Message::CommitOffset(CommitOffsetRequest::decode(payload)?)),
+        PRODUCE => Ok(Message::Produce(ProduceRequest::decode(payload)?)),
         R_ECHO => Ok(Message::REcho(
             String::from_utf8_lossy(payload).into_owned(),
         )),
@@ -225,6 +261,18 @@ pub fn parse_frame(body: &[u8]) -> io::Result<Message> {
         R_COMMIT => {
             let byte = payload.first().copied().unwrap_or(0);
             Ok(Message::RCommitOffset(byte))
+        }
+        R_PRODUCE => {
+            if payload.len() < 8 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "R_PRODUCE payload too short",
+                ));
+            }
+            Ok(Message::RProduce(u64::from_be_bytes([
+                payload[0], payload[1], payload[2], payload[3], payload[4], payload[5], payload[6],
+                payload[7],
+            ])))
         }
         other => Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -259,12 +307,14 @@ pub async fn write_message<W: AsyncWrite + Unpin>(
         Message::Pcm(bytes) => frame_bytes(PCM, bytes),
         Message::Fetch(req) => frame_bytes(FETCH, &req.encode()),
         Message::CommitOffset(req) => frame_bytes(COMMIT, &req.encode()),
+        Message::Produce(req) => frame_bytes(PRODUCE, &req.encode()),
         Message::REcho(s) => frame_bytes(R_ECHO, s.as_bytes()),
         Message::RProducerRegister(b) => frame_bytes(R_P_REG, &[*b]),
         Message::RConsumerRegister(b) => frame_bytes(R_C_REG, &[*b]),
         Message::RPcm(b) => frame_bytes(R_PCM, &[*b]),
         Message::RFetch(bytes) => frame_bytes(R_FETCH, bytes),
         Message::RCommitOffset(b) => frame_bytes(R_COMMIT, &[*b]),
+        Message::RProduce(offset) => frame_bytes(R_PRODUCE, &offset.to_be_bytes()),
     };
     writer.write_all(&frame).await?;
     writer.flush().await
@@ -331,6 +381,17 @@ mod tests {
             offset: 42,
         };
         let decoded = CommitOffsetRequest::decode(&req.encode()).unwrap();
+        assert_eq!(req, decoded);
+    }
+
+    #[test]
+    fn produce_request_roundtrip() {
+        let req = ProduceRequest {
+            topic_id: 1,
+            partition_id: 0,
+            payload: b"hello".to_vec(),
+        };
+        let decoded = ProduceRequest::decode(&req.encode()).unwrap();
         assert_eq!(req, decoded);
     }
 }

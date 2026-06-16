@@ -1,7 +1,9 @@
 //! CLI entry point: `server`, `producer`, and `consumer` subcommands.
 
 mod consumer_client;
+mod consumer_fetch;
 mod producer;
+mod producer_direct;
 
 use custom_dmq::broker::{broker_port, data_dir_from_env, run_consumer_ready_and_send, Broker};
 use custom_dmq::fetch_batch::encode_records;
@@ -30,11 +32,21 @@ async fn main() {
             let simulate = args.get(4).map(|s| s == "--simulate").unwrap_or(false);
             producer::run(port, topic_id, simulate).await;
         }
+        "produce" => {
+            let topic_id = parse_u16(&args, 2, "topic_id");
+            let simulate = args.get(3).map(|s| s == "--simulate").unwrap_or(false);
+            producer_direct::run(topic_id, simulate).await;
+        }
         "consumer" => {
             let port = parse_u16(&args, 2, "port");
             let topic_id = parse_u16(&args, 3, "topic_id");
             let group_id = parse_u16(&args, 4, "group_id");
             consumer_client::run(port, topic_id, group_id).await;
+        }
+        "fetch" => {
+            let topic_id = parse_u16(&args, 2, "topic_id");
+            let group_id = parse_u16(&args, 3, "group_id");
+            consumer_fetch::run(topic_id, group_id).await;
         }
         _ => {
             print_usage();
@@ -48,7 +60,9 @@ fn print_usage() {
         "Usage:
   custom-dmq server
   custom-dmq producer <port> <topic_id> [--simulate]
-  custom-dmq consumer <port> <topic_id> <group_id>"
+  custom-dmq consumer <port> <topic_id> <group_id>
+  custom-dmq produce <topic_id> [--simulate]
+  custom-dmq fetch <topic_id> <group_id>"
     );
 }
 
@@ -153,9 +167,18 @@ async fn handle_broker_connection(socket: TcpStream, broker: SharedBroker) {
         Message::CommitOffset(req) => {
             {
                 let mut b = broker.lock().await;
-                b.commit_offset(req);
+                if b.commit_offset(req).is_err() {
+                    return;
+                }
             }
             Message::RCommitOffset(0)
+        }
+        Message::Produce(req) => {
+            let (_, offset) = {
+                let mut b = broker.lock().await;
+                b.produce_pcm(req.topic_id, &req.payload).unwrap_or((1, 0))
+            };
+            Message::RProduce(offset)
         }
         other => {
             eprintln!("[broker] Unexpected message on register port: {other:?}");
