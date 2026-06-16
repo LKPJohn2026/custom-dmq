@@ -1,6 +1,6 @@
 # custom-dmq
 
-> A Kafka-inspired message queue in Rust (Tokio): **MySQL-first writes** → **Debezium**
+> A Kafka-inspired distributed message queue in Rust (Tokio): **MySQL-first writes** → **Debezium**
 > → **Kafka** → **cache invalidation**.
 >
 > *(No — just kidding.)* This repo is a small educational **distributed message queue**
@@ -15,21 +15,21 @@ Design notes: [`docs/architecture.md`](docs/architecture.md).
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────────┐
-│                                local host                                 │
+│                                local host                                │
 │                                                                          │
 │  producer (bind :P)                                                      │
 │     │  P_REG(topic_id, port=P)                                           │
 │     ▼                                                                    │
-│  broker (TCP :7777) ────── dials back ──────▶ producer (TCP :P)          │
-│     │                                                          │        │
-│     │                           PCM(payload)                   │        │
+│  broker (TCP :7777) ────── dials back ──────▶ producer (TCP :P)         │
+│     │                                                          │         │
+│     │                           PCM(payload)                   │         │
 │     │◀─────────────────────────────────────────────────────────┘        │
 │     │  route: topic staging → per-group partitions                       │
 │     ▼                                                                    │
 │  consumer (bind :C)                                                      │
 │     │  C_REG(topic_id, group_id, port=C)                                 │
 │     ▼                                                                    │
-│  broker (TCP :7777) ────── dials back ──────▶ consumer (TCP :C)          │
+│  broker (TCP :7777) ────── dials back ──────▶ consumer (TCP :C)         │
 │                                              │                           │
 │                                              │  R_PCM (ready)            │
 │                                              ▼                           │
