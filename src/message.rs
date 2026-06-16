@@ -13,11 +13,15 @@ pub const ECHO: u8 = 1;
 pub const P_REG: u8 = 2;
 pub const C_REG: u8 = 3;
 pub const PCM: u8 = 4;
+pub const FETCH: u8 = 5;
+pub const COMMIT: u8 = 6;
 
 pub const R_ECHO: u8 = 101;
 pub const R_P_REG: u8 = 102;
 pub const R_C_REG: u8 = 103;
 pub const R_PCM: u8 = 104;
+pub const R_FETCH: u8 = 105;
+pub const R_COMMIT: u8 = 106;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProducerRegister {
@@ -33,15 +37,35 @@ pub struct ConsumerRegister {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchRequest {
+    pub topic_id: u16,
+    pub partition_id: u16,
+    pub offset: u64,
+    pub max_bytes: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitOffsetRequest {
+    pub group_id: u16,
+    pub topic_id: u16,
+    pub partition_id: u16,
+    pub offset: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
     Echo(String),
     ProducerRegister(ProducerRegister),
     ConsumerRegister(ConsumerRegister),
     Pcm(Vec<u8>),
+    Fetch(FetchRequest),
+    CommitOffset(CommitOffsetRequest),
     REcho(String),
     RProducerRegister(u8),
     RConsumerRegister(u8),
     RPcm(u8),
+    RFetch(Vec<u8>),
+    RCommitOffset(u8),
 }
 
 impl ProducerRegister {
@@ -95,6 +119,76 @@ impl ConsumerRegister {
     }
 }
 
+impl FetchRequest {
+    pub fn encode(&self) -> [u8; 16] {
+        let mut data = [0u8; 16];
+        data[0..2].copy_from_slice(&self.topic_id.to_be_bytes());
+        data[2..4].copy_from_slice(&self.partition_id.to_be_bytes());
+        data[4..12].copy_from_slice(&self.offset.to_be_bytes());
+        data[12..16].copy_from_slice(&self.max_bytes.to_be_bytes());
+        data
+    }
+
+    pub fn decode(payload: &[u8]) -> io::Result<Self> {
+        if payload.len() < 16 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "FETCH payload too short",
+            ));
+        }
+        Ok(FetchRequest {
+            topic_id: u16::from_be_bytes([payload[0], payload[1]]),
+            partition_id: u16::from_be_bytes([payload[2], payload[3]]),
+            offset: u64::from_be_bytes([
+                payload[4],
+                payload[5],
+                payload[6],
+                payload[7],
+                payload[8],
+                payload[9],
+                payload[10],
+                payload[11],
+            ]),
+            max_bytes: u32::from_be_bytes([payload[12], payload[13], payload[14], payload[15]]),
+        })
+    }
+}
+
+impl CommitOffsetRequest {
+    pub fn encode(&self) -> [u8; 14] {
+        let mut data = [0u8; 14];
+        data[0..2].copy_from_slice(&self.group_id.to_be_bytes());
+        data[2..4].copy_from_slice(&self.topic_id.to_be_bytes());
+        data[4..6].copy_from_slice(&self.partition_id.to_be_bytes());
+        data[6..14].copy_from_slice(&self.offset.to_be_bytes());
+        data
+    }
+
+    pub fn decode(payload: &[u8]) -> io::Result<Self> {
+        if payload.len() < 14 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "COMMIT payload too short",
+            ));
+        }
+        Ok(CommitOffsetRequest {
+            group_id: u16::from_be_bytes([payload[0], payload[1]]),
+            topic_id: u16::from_be_bytes([payload[2], payload[3]]),
+            partition_id: u16::from_be_bytes([payload[4], payload[5]]),
+            offset: u64::from_be_bytes([
+                payload[6],
+                payload[7],
+                payload[8],
+                payload[9],
+                payload[10],
+                payload[11],
+                payload[12],
+                payload[13],
+            ]),
+        })
+    }
+}
+
 pub fn parse_frame(body: &[u8]) -> io::Result<Message> {
     if body.is_empty() {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "empty frame"));
@@ -110,6 +204,8 @@ pub fn parse_frame(body: &[u8]) -> io::Result<Message> {
             payload,
         )?)),
         PCM => Ok(Message::Pcm(payload.to_vec())),
+        FETCH => Ok(Message::Fetch(FetchRequest::decode(payload)?)),
+        COMMIT => Ok(Message::CommitOffset(CommitOffsetRequest::decode(payload)?)),
         R_ECHO => Ok(Message::REcho(
             String::from_utf8_lossy(payload).into_owned(),
         )),
@@ -124,6 +220,11 @@ pub fn parse_frame(body: &[u8]) -> io::Result<Message> {
         R_PCM => {
             let byte = payload.first().copied().unwrap_or(0);
             Ok(Message::RPcm(byte))
+        }
+        R_FETCH => Ok(Message::RFetch(payload.to_vec())),
+        R_COMMIT => {
+            let byte = payload.first().copied().unwrap_or(0);
+            Ok(Message::RCommitOffset(byte))
         }
         other => Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -156,10 +257,14 @@ pub async fn write_message<W: AsyncWrite + Unpin>(
         Message::ProducerRegister(reg) => frame_bytes(P_REG, &reg.encode()),
         Message::ConsumerRegister(reg) => frame_bytes(C_REG, &reg.encode()),
         Message::Pcm(bytes) => frame_bytes(PCM, bytes),
+        Message::Fetch(req) => frame_bytes(FETCH, &req.encode()),
+        Message::CommitOffset(req) => frame_bytes(COMMIT, &req.encode()),
         Message::REcho(s) => frame_bytes(R_ECHO, s.as_bytes()),
         Message::RProducerRegister(b) => frame_bytes(R_P_REG, &[*b]),
         Message::RConsumerRegister(b) => frame_bytes(R_C_REG, &[*b]),
         Message::RPcm(b) => frame_bytes(R_PCM, &[*b]),
+        Message::RFetch(bytes) => frame_bytes(R_FETCH, bytes),
+        Message::RCommitOffset(b) => frame_bytes(R_COMMIT, &[*b]),
     };
     writer.write_all(&frame).await?;
     writer.flush().await
@@ -203,5 +308,29 @@ mod tests {
             parse_frame(&pcm_body).unwrap(),
             Message::Pcm(b"abc".to_vec())
         );
+    }
+
+    #[test]
+    fn fetch_request_roundtrip() {
+        let req = FetchRequest {
+            topic_id: 7,
+            partition_id: 2,
+            offset: 42,
+            max_bytes: 4096,
+        };
+        let decoded = FetchRequest::decode(&req.encode()).unwrap();
+        assert_eq!(req, decoded);
+    }
+
+    #[test]
+    fn commit_offset_roundtrip() {
+        let req = CommitOffsetRequest {
+            group_id: 1,
+            topic_id: 7,
+            partition_id: 2,
+            offset: 42,
+        };
+        let decoded = CommitOffsetRequest::decode(&req.encode()).unwrap();
+        assert_eq!(req, decoded);
     }
 }
