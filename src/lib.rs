@@ -6,4 +6,5 @@ pub mod message;
 pub mod metadata;
 pub mod mmap_queue;
 pub mod partition;
+pub mod storage;
 pub mod topic;

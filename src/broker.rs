@@ -8,6 +8,7 @@
 
 use crate::message::{self, ConsumerRegister, Message, ProducerRegister};
 use crate::metadata::store_broker_topics;
+use crate::storage::{GroupId, PartitionIdx, Storage, TopicId};
 use crate::topic::Topic;
 use std::collections::HashMap;
 use std::io;
@@ -199,6 +200,59 @@ impl Broker {
                 Ok(true)
             }
         }
+    }
+}
+
+impl Storage for Broker {
+    fn ensure_topic(&mut self, topic_id: TopicId) -> io::Result<()> {
+        self.topic_mut(topic_id)?;
+        Ok(())
+    }
+
+    fn ensure_group(&mut self, topic_id: TopicId, group_id: GroupId) -> io::Result<()> {
+        let topic = self.topic_mut(topic_id)?;
+        topic.find_or_create_group(group_id)?;
+        Ok(())
+    }
+
+    fn assign_partition(
+        &mut self,
+        topic_id: TopicId,
+        group_id: GroupId,
+    ) -> io::Result<PartitionIdx> {
+        let data_dir = self.data_dir.clone();
+        let topic = self.topic_mut(topic_id)?;
+        topic.find_or_create_group(group_id)?;
+        let idx = topic
+            .group_mut(group_id)
+            .expect("group exists")
+            .assign_partition(&data_dir, topic_id)?;
+        Ok(idx)
+    }
+
+    fn produce(&mut self, topic_id: TopicId, payload: &[u8]) -> io::Result<(u8, u64)> {
+        self.produce_pcm(topic_id, payload)
+    }
+
+    fn consume_one(
+        &mut self,
+        topic_id: TopicId,
+        group_id: GroupId,
+        partition_idx: PartitionIdx,
+    ) -> io::Result<Option<Vec<u8>>> {
+        let topic = match self.topics.get_mut(&topic_id) {
+            Some(t) => t,
+            None => return Ok(None),
+        };
+        topic.find_or_create_group(group_id)?;
+        let partition = match topic
+            .group_mut(group_id)
+            .and_then(|g| g.partitions.get_mut(partition_idx as usize))
+        {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+        Ok(partition.pop_front())
     }
 }
 
