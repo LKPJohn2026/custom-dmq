@@ -6,8 +6,11 @@
 //! readiness with R_PCM and receive the next message from their assigned partition.
 //! Queue data and metadata are persisted under a configurable data directory.
 
-use crate::message::{self, ConsumerRegister, Message, ProducerRegister};
+use crate::message::{
+    self, CommitOffsetRequest, ConsumerRegister, FetchRequest, Message, ProducerRegister,
+};
 use crate::metadata::store_broker_topics;
+use crate::partition_log::{PartitionLog, Record};
 use crate::storage::{GroupId, PartitionIdx, Storage, TopicId};
 use crate::topic::Topic;
 use std::collections::HashMap;
@@ -44,6 +47,8 @@ pub fn data_dir_from_env() -> PathBuf {
 
 pub struct Broker {
     topics: HashMap<u16, Topic>,
+    logs: HashMap<(u16, u16), PartitionLog>,
+    committed_offsets: HashMap<(u16, u16, u16), u64>,
     data_dir: PathBuf,
     _temp_dir: Option<tempfile::TempDir>,
 }
@@ -65,6 +70,8 @@ impl Broker {
         }
         Ok(Broker {
             topics,
+            logs: HashMap::new(),
+            committed_offsets: HashMap::new(),
             data_dir,
             _temp_dir: None,
         })
@@ -98,7 +105,40 @@ impl Broker {
             self.topics.insert(topic_id, topic);
             self.persist_topics()?;
         }
+        self.ensure_log(topic_id, 0);
         Ok(self.topics.get_mut(&topic_id).expect("topic inserted"))
+    }
+
+    fn ensure_log(&mut self, topic_id: u16, partition_id: u16) {
+        self.logs.entry((topic_id, partition_id)).or_default();
+    }
+
+    pub fn append_log(&mut self, topic_id: u16, partition_id: u16, payload: &[u8]) -> u64 {
+        self.ensure_log(topic_id, partition_id);
+        self.logs
+            .get_mut(&(topic_id, partition_id))
+            .expect("log exists")
+            .append(payload)
+    }
+
+    pub fn fetch_log(&mut self, req: &FetchRequest) -> Vec<Record> {
+        self.ensure_log(req.topic_id, req.partition_id);
+        let log = self
+            .logs
+            .get(&(req.topic_id, req.partition_id))
+            .expect("log exists");
+        log.fetch(req.offset, req.max_bytes as usize).records
+    }
+
+    pub fn commit_offset(&mut self, req: &CommitOffsetRequest) {
+        self.committed_offsets
+            .insert((req.group_id, req.topic_id, req.partition_id), req.offset);
+    }
+
+    pub fn committed_offset(&self, group_id: u16, topic_id: u16, partition_id: u16) -> Option<u64> {
+        self.committed_offsets
+            .get(&(group_id, topic_id, partition_id))
+            .copied()
     }
 
     pub fn process_echo(&self, text: &str) -> String {
@@ -124,11 +164,18 @@ impl Broker {
     }
 
     pub fn produce_pcm(&mut self, topic_id: u16, payload: &[u8]) -> io::Result<(u8, u64)> {
+        // Append to the topic-partition log first (Phase 1 path).
+        self.ensure_log(topic_id, 0);
+        let log_offset = {
+            let log = self.logs.get_mut(&(topic_id, 0)).expect("log exists");
+            log.append(payload)
+        };
+
         let topic = self.topic_mut(topic_id)?;
 
         if topic.cgroups.is_empty() {
             let offset = topic.append_to_staging(payload);
-            return Ok((0, offset));
+            return Ok((0, log_offset.max(offset)));
         }
 
         let payload = payload.to_vec();
@@ -141,7 +188,7 @@ impl Broker {
             topic.cgroups[i].partitions[partition_idx].append(&payload);
         }
 
-        Ok((0, 0))
+        Ok((0, log_offset))
     }
 
     pub fn topic_ids_with_groups(&self) -> Vec<(u16, Vec<u16>)> {
@@ -445,5 +492,35 @@ mod tests {
         }
         let broker = Broker::open(dir.path()).unwrap();
         assert_eq!(broker.topic_staging_len(5), Some(1));
+    }
+
+    #[test]
+    fn commit_and_fetch_log_roundtrip() {
+        let mut broker = Broker::new();
+        broker
+            .register_producer(&ProducerRegister {
+                port: 7778,
+                topic_id: 1,
+            })
+            .unwrap();
+        broker.produce_pcm(1, b"a").unwrap();
+        broker.produce_pcm(1, b"bb").unwrap();
+
+        let records = broker.fetch_log(&FetchRequest {
+            topic_id: 1,
+            partition_id: 0,
+            offset: 0,
+            max_bytes: 1024,
+        });
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].payload, b"a".to_vec());
+
+        broker.commit_offset(&CommitOffsetRequest {
+            group_id: 7,
+            topic_id: 1,
+            partition_id: 0,
+            offset: 2,
+        });
+        assert_eq!(broker.committed_offset(7, 1, 0), Some(2));
     }
 }

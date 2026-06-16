@@ -4,6 +4,7 @@ mod consumer_client;
 mod producer;
 
 use custom_dmq::broker::{broker_port, data_dir_from_env, run_consumer_ready_and_send, Broker};
+use custom_dmq::fetch_batch::encode_records;
 use custom_dmq::message::Message;
 use std::sync::Arc;
 use tokio::io::BufReader;
@@ -141,6 +142,20 @@ async fn handle_broker_connection(socket: TcpStream, broker: SharedBroker) {
                 Arc::clone(&broker),
             ));
             Message::RConsumerRegister(0)
+        }
+        Message::Fetch(req) => {
+            let records = {
+                let mut b = broker.lock().await;
+                b.fetch_log(req)
+            };
+            Message::RFetch(encode_records(&records))
+        }
+        Message::CommitOffset(req) => {
+            {
+                let mut b = broker.lock().await;
+                b.commit_offset(req);
+            }
+            Message::RCommitOffset(0)
         }
         other => {
             eprintln!("[broker] Unexpected message on register port: {other:?}");

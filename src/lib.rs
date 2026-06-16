@@ -2,6 +2,7 @@
 
 pub mod broker;
 pub mod cgroup;
+pub mod fetch_batch;
 pub mod message;
 pub mod metadata;
 pub mod mmap_queue;
