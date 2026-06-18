@@ -27,6 +27,43 @@ pub fn offset_metadata_path(
     ))
 }
 
+pub fn topic_config_path(data_dir: &Path, topic_id: u16) -> PathBuf {
+    data_dir.join(format!("topic_config_{topic_id}.dat"))
+}
+
+pub fn store_topic_config(
+    data_dir: &Path,
+    topic_id: u16,
+    partition_count: u16,
+    max_records: u32,
+) -> io::Result<()> {
+    std::fs::create_dir_all(data_dir)?;
+    let path = topic_config_path(data_dir, topic_id);
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)?;
+    write_u16(&mut file, 0, partition_count)?;
+    write_u32(&mut file, 2, max_records)
+}
+
+pub fn load_topic_config(
+    data_dir: &Path,
+    topic_id: u16,
+) -> io::Result<Option<(u16, u32)>> {
+    let path = topic_config_path(data_dir, topic_id);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let mut file = File::open(path)?;
+    Ok(Some((
+        read_u16(&mut file, 0)?,
+        read_u32(&mut file, 2)?,
+    )))
+}
+
 fn read_u32(file: &mut File, offset: u64) -> io::Result<u32> {
     let mut buf = [0u8; 4];
     file.seek(std::io::SeekFrom::Start(offset))?;
@@ -222,5 +259,12 @@ mod tests {
             load_committed_offset(dir.path(), 7, 1, 0).unwrap(),
             Some(123)
         );
+    }
+
+    #[test]
+    fn topic_config_roundtrip() {
+        let dir = tempdir().unwrap();
+        store_topic_config(dir.path(), 3, 4, 5000).unwrap();
+        assert_eq!(load_topic_config(dir.path(), 3).unwrap(), Some((4, 5000)));
     }
 }

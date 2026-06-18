@@ -16,6 +16,10 @@ pub const PCM: u8 = 4;
 pub const FETCH: u8 = 5;
 pub const COMMIT: u8 = 6;
 pub const PRODUCE: u8 = 7;
+pub const CREATE_TOPIC: u8 = 8;
+pub const DESCRIBE_TOPIC: u8 = 9;
+pub const LIST_TOPICS: u8 = 10;
+pub const GET_LAG: u8 = 11;
 
 pub const R_ECHO: u8 = 101;
 pub const R_P_REG: u8 = 102;
@@ -24,6 +28,10 @@ pub const R_PCM: u8 = 104;
 pub const R_FETCH: u8 = 105;
 pub const R_COMMIT: u8 = 106;
 pub const R_PRODUCE: u8 = 107;
+pub const R_CREATE_TOPIC: u8 = 108;
+pub const R_DESCRIBE_TOPIC: u8 = 109;
+pub const R_LIST_TOPICS: u8 = 110;
+pub const R_GET_LAG: u8 = 111;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProducerRegister {
@@ -62,6 +70,24 @@ pub struct ProduceRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateTopicRequest {
+    pub topic_id: u16,
+    pub partition_count: u16,
+    pub max_records: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DescribeTopicRequest {
+    pub topic_id: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GetLagRequest {
+    pub group_id: u16,
+    pub topic_id: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
     Echo(String),
     ProducerRegister(ProducerRegister),
@@ -70,6 +96,10 @@ pub enum Message {
     Fetch(FetchRequest),
     CommitOffset(CommitOffsetRequest),
     Produce(ProduceRequest),
+    CreateTopic(CreateTopicRequest),
+    DescribeTopic(DescribeTopicRequest),
+    ListTopics,
+    GetLag(GetLagRequest),
     REcho(String),
     RProducerRegister(u8),
     RConsumerRegister(u8),
@@ -77,6 +107,10 @@ pub enum Message {
     RFetch(Vec<u8>),
     RCommitOffset(u8),
     RProduce(u64),
+    RCreateTopic(u8),
+    RDescribeTopic(Vec<u8>),
+    RListTopics(Vec<u8>),
+    RGetLag(Vec<u8>),
 }
 
 impl ProducerRegister {
@@ -224,6 +258,70 @@ impl ProduceRequest {
     }
 }
 
+impl CreateTopicRequest {
+    pub fn encode(&self) -> [u8; 8] {
+        let mut data = [0u8; 8];
+        data[0..2].copy_from_slice(&self.topic_id.to_be_bytes());
+        data[2..4].copy_from_slice(&self.partition_count.to_be_bytes());
+        data[4..8].copy_from_slice(&self.max_records.to_be_bytes());
+        data
+    }
+
+    pub fn decode(payload: &[u8]) -> io::Result<Self> {
+        if payload.len() < 8 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "CREATE_TOPIC payload too short",
+            ));
+        }
+        Ok(CreateTopicRequest {
+            topic_id: u16::from_be_bytes([payload[0], payload[1]]),
+            partition_count: u16::from_be_bytes([payload[2], payload[3]]),
+            max_records: u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]),
+        })
+    }
+}
+
+impl DescribeTopicRequest {
+    pub fn encode(&self) -> [u8; 2] {
+        self.topic_id.to_be_bytes()
+    }
+
+    pub fn decode(payload: &[u8]) -> io::Result<Self> {
+        if payload.len() < 2 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "DESCRIBE_TOPIC payload too short",
+            ));
+        }
+        Ok(DescribeTopicRequest {
+            topic_id: u16::from_be_bytes([payload[0], payload[1]]),
+        })
+    }
+}
+
+impl GetLagRequest {
+    pub fn encode(&self) -> [u8; 4] {
+        let mut data = [0u8; 4];
+        data[0..2].copy_from_slice(&self.group_id.to_be_bytes());
+        data[2..4].copy_from_slice(&self.topic_id.to_be_bytes());
+        data
+    }
+
+    pub fn decode(payload: &[u8]) -> io::Result<Self> {
+        if payload.len() < 4 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "GET_LAG payload too short",
+            ));
+        }
+        Ok(GetLagRequest {
+            group_id: u16::from_be_bytes([payload[0], payload[1]]),
+            topic_id: u16::from_be_bytes([payload[2], payload[3]]),
+        })
+    }
+}
+
 pub fn parse_frame(body: &[u8]) -> io::Result<Message> {
     if body.is_empty() {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "empty frame"));
@@ -242,6 +340,12 @@ pub fn parse_frame(body: &[u8]) -> io::Result<Message> {
         FETCH => Ok(Message::Fetch(FetchRequest::decode(payload)?)),
         COMMIT => Ok(Message::CommitOffset(CommitOffsetRequest::decode(payload)?)),
         PRODUCE => Ok(Message::Produce(ProduceRequest::decode(payload)?)),
+        CREATE_TOPIC => Ok(Message::CreateTopic(CreateTopicRequest::decode(payload)?)),
+        DESCRIBE_TOPIC => Ok(Message::DescribeTopic(DescribeTopicRequest::decode(
+            payload,
+        )?)),
+        LIST_TOPICS => Ok(Message::ListTopics),
+        GET_LAG => Ok(Message::GetLag(GetLagRequest::decode(payload)?)),
         R_ECHO => Ok(Message::REcho(
             String::from_utf8_lossy(payload).into_owned(),
         )),
@@ -274,6 +378,13 @@ pub fn parse_frame(body: &[u8]) -> io::Result<Message> {
                 payload[7],
             ])))
         }
+        R_CREATE_TOPIC => {
+            let byte = payload.first().copied().unwrap_or(0);
+            Ok(Message::RCreateTopic(byte))
+        }
+        R_DESCRIBE_TOPIC => Ok(Message::RDescribeTopic(payload.to_vec())),
+        R_LIST_TOPICS => Ok(Message::RListTopics(payload.to_vec())),
+        R_GET_LAG => Ok(Message::RGetLag(payload.to_vec())),
         other => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("unknown message type {other}"),
@@ -308,6 +419,10 @@ pub async fn write_message<W: AsyncWrite + Unpin>(
         Message::Fetch(req) => frame_bytes(FETCH, &req.encode()),
         Message::CommitOffset(req) => frame_bytes(COMMIT, &req.encode()),
         Message::Produce(req) => frame_bytes(PRODUCE, &req.encode()),
+        Message::CreateTopic(req) => frame_bytes(CREATE_TOPIC, &req.encode()),
+        Message::DescribeTopic(req) => frame_bytes(DESCRIBE_TOPIC, &req.encode()),
+        Message::ListTopics => frame_bytes(LIST_TOPICS, &[]),
+        Message::GetLag(req) => frame_bytes(GET_LAG, &req.encode()),
         Message::REcho(s) => frame_bytes(R_ECHO, s.as_bytes()),
         Message::RProducerRegister(b) => frame_bytes(R_P_REG, &[*b]),
         Message::RConsumerRegister(b) => frame_bytes(R_C_REG, &[*b]),
@@ -315,6 +430,10 @@ pub async fn write_message<W: AsyncWrite + Unpin>(
         Message::RFetch(bytes) => frame_bytes(R_FETCH, bytes),
         Message::RCommitOffset(b) => frame_bytes(R_COMMIT, &[*b]),
         Message::RProduce(offset) => frame_bytes(R_PRODUCE, &offset.to_be_bytes()),
+        Message::RCreateTopic(b) => frame_bytes(R_CREATE_TOPIC, &[*b]),
+        Message::RDescribeTopic(bytes) => frame_bytes(R_DESCRIBE_TOPIC, bytes),
+        Message::RListTopics(bytes) => frame_bytes(R_LIST_TOPICS, bytes),
+        Message::RGetLag(bytes) => frame_bytes(R_GET_LAG, bytes),
     };
     writer.write_all(&frame).await?;
     writer.flush().await
@@ -392,6 +511,17 @@ mod tests {
             payload: b"hello".to_vec(),
         };
         let decoded = ProduceRequest::decode(&req.encode()).unwrap();
+        assert_eq!(req, decoded);
+    }
+
+    #[test]
+    fn create_topic_roundtrip() {
+        let req = CreateTopicRequest {
+            topic_id: 5,
+            partition_count: 3,
+            max_records: 100,
+        };
+        let decoded = CreateTopicRequest::decode(&req.encode()).unwrap();
         assert_eq!(req, decoded);
     }
 }

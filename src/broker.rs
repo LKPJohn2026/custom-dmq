@@ -6,13 +6,17 @@
 //! readiness with R_PCM and receive the next message from their assigned partition.
 //! Queue data and metadata are persisted under a configurable data directory.
 
+use crate::limits;
+use crate::log_store;
 use crate::message::{
     self, CommitOffsetRequest, ConsumerRegister, FetchRequest, Message, ProducerRegister,
 };
-use crate::metadata::{load_committed_offset, store_broker_topics, store_committed_offset};
+use crate::metadata::{load_committed_offset, load_topic_config, store_broker_topics, store_committed_offset, store_topic_config};
+use crate::metrics::BrokerMetrics;
 use crate::partition_log::{PartitionLog, Record};
 use crate::storage::{GroupId, PartitionIdx, Storage, TopicId};
 use crate::topic::Topic;
+use crate::topic_config::TopicConfig;
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -48,8 +52,10 @@ pub fn data_dir_from_env() -> PathBuf {
 pub struct Broker {
     topics: HashMap<u16, Topic>,
     logs: HashMap<(u16, u16), PartitionLog>,
+    topic_configs: HashMap<u16, TopicConfig>,
     committed_offsets: HashMap<(u16, u16, u16), u64>,
     data_dir: PathBuf,
+    metrics: Arc<BrokerMetrics>,
     _temp_dir: Option<tempfile::TempDir>,
 }
 
@@ -65,16 +71,27 @@ impl Broker {
         std::fs::create_dir_all(&data_dir)?;
         let topic_ids = crate::metadata::load_broker_topics(&data_dir)?;
         let mut topics = HashMap::new();
-        for topic_id in topic_ids {
+        let mut topic_configs = HashMap::new();
+        for &topic_id in &topic_ids {
             topics.insert(topic_id, Topic::load(&data_dir, topic_id)?);
+            if let Some((partition_count, max_records)) = load_topic_config(&data_dir, topic_id)? {
+                topic_configs.insert(
+                    topic_id,
+                    TopicConfig::new(topic_id, partition_count, max_records),
+                );
+            }
         }
-        Ok(Broker {
+        let mut broker = Broker {
             topics,
             logs: HashMap::new(),
+            topic_configs,
             committed_offsets: HashMap::new(),
             data_dir,
+            metrics: Arc::new(BrokerMetrics::new()),
             _temp_dir: None,
-        })
+        };
+        broker.load_logs()?;
+        Ok(broker)
     }
 
     pub fn open_ephemeral() -> io::Result<Self> {
@@ -93,6 +110,48 @@ impl Broker {
         &self.data_dir
     }
 
+    pub fn metrics(&self) -> Arc<BrokerMetrics> {
+        Arc::clone(&self.metrics)
+    }
+
+    fn topic_config(&self, topic_id: u16) -> TopicConfig {
+        self.topic_configs
+            .get(&topic_id)
+            .cloned()
+            .unwrap_or_else(|| TopicConfig::default_for(topic_id))
+    }
+
+    fn load_logs(&mut self) -> io::Result<()> {
+        let topic_ids: Vec<u16> = self.topics.keys().copied().collect();
+        for topic_id in topic_ids {
+            let cfg = self.topic_config(topic_id);
+            for p in 0..cfg.partition_count {
+                let log = log_store::load_partition_log(
+                    &self.data_dir,
+                    topic_id,
+                    p,
+                    Some(cfg.max_records as usize),
+                )?;
+                self.logs.insert((topic_id, p), log);
+            }
+        }
+        Ok(())
+    }
+
+    fn persist_log_meta(&self, topic_id: u16, partition_id: u16) -> io::Result<()> {
+        if let Some(log) = self.logs.get(&(topic_id, partition_id)) {
+            log_store::store_meta_offsets(
+                &self.data_dir,
+                topic_id,
+                partition_id,
+                Some(log.base_offset()),
+                Some(log.next_offset()),
+            )
+        } else {
+            Ok(())
+        }
+    }
+
     fn persist_topics(&self) -> io::Result<()> {
         let mut topic_ids: Vec<u16> = self.topics.keys().copied().collect();
         topic_ids.sort_unstable();
@@ -103,31 +162,57 @@ impl Broker {
         if !self.topics.contains_key(&topic_id) {
             let topic = Topic::create(&self.data_dir, topic_id)?;
             self.topics.insert(topic_id, topic);
+            self.topic_configs
+                .entry(topic_id)
+                .or_insert_with(|| TopicConfig::default_for(topic_id));
             self.persist_topics()?;
         }
-        self.ensure_log(topic_id, 0);
+        self.ensure_log_with_config(topic_id, 0);
         Ok(self.topics.get_mut(&topic_id).expect("topic inserted"))
     }
 
-    fn ensure_log(&mut self, topic_id: u16, partition_id: u16) {
-        self.logs.entry((topic_id, partition_id)).or_default();
+    fn ensure_log_with_config(&mut self, topic_id: u16, partition_id: u16) {
+        let cfg = self.topic_config(topic_id);
+        self.logs
+            .entry((topic_id, partition_id))
+            .or_insert_with(|| PartitionLog::with_max_records(cfg.max_records as usize));
     }
 
-    pub fn append_log(&mut self, topic_id: u16, partition_id: u16, payload: &[u8]) -> u64 {
-        self.ensure_log(topic_id, partition_id);
-        self.logs
+    fn ensure_log(&mut self, topic_id: u16, partition_id: u16) {
+        self.ensure_log_with_config(topic_id, partition_id);
+    }
+
+    pub fn append_log(&mut self, topic_id: u16, partition_id: u16, payload: &[u8]) -> io::Result<u64> {
+        limits::validate_produce_payload(payload.len())?;
+        self.topic_mut(topic_id)?;
+        self.ensure_log_with_config(topic_id, partition_id);
+        let offset = self
+            .logs
             .get_mut(&(topic_id, partition_id))
             .expect("log exists")
-            .append(payload)
+            .append(payload);
+        let record = Record {
+            offset,
+            payload: payload.to_vec(),
+        };
+        log_store::append_record(&self.data_dir, topic_id, partition_id, &record)?;
+        self.persist_log_meta(topic_id, partition_id)?;
+        self.metrics.record_produce(payload.len());
+        Ok(offset)
     }
 
     pub fn fetch_log(&mut self, req: &FetchRequest) -> Vec<Record> {
         self.ensure_log(req.topic_id, req.partition_id);
+        let max_bytes = limits::clamp_fetch_bytes(req.max_bytes) as usize;
         let log = self
             .logs
             .get(&(req.topic_id, req.partition_id))
             .expect("log exists");
-        log.fetch(req.offset, req.max_bytes as usize).records
+        let result = log.fetch(req.offset, max_bytes);
+        let bytes: usize = result.records.iter().map(|r| r.payload.len()).sum();
+        self.metrics
+            .record_fetch(bytes, result.records.len());
+        result.records
     }
 
     pub fn commit_offset(&mut self, req: &CommitOffsetRequest) -> io::Result<()> {
@@ -140,7 +225,78 @@ impl Broker {
             req.partition_id,
             req.offset,
         )?;
+        self.metrics.record_commit();
         Ok(())
+    }
+
+    pub fn create_topic(&mut self, cfg: TopicConfig) -> io::Result<u8> {
+        if self.topics.contains_key(&cfg.topic_id) {
+            return Ok(1);
+        }
+        store_topic_config(
+            &self.data_dir,
+            cfg.topic_id,
+            cfg.partition_count,
+            cfg.max_records,
+        )?;
+        self.topic_configs.insert(cfg.topic_id, cfg.clone());
+        self.topic_mut(cfg.topic_id)?;
+        for p in 0..cfg.partition_count {
+            self.ensure_log_with_config(cfg.topic_id, p);
+        }
+        Ok(0)
+    }
+
+    pub fn describe_topic(&self, topic_id: u16) -> Vec<u8> {
+        if !self.topics.contains_key(&topic_id) {
+            return vec![0, 0];
+        }
+        let cfg = self.topic_config(topic_id);
+        let mut out = Vec::new();
+        out.extend_from_slice(&cfg.partition_count.to_be_bytes());
+        for p in 0..cfg.partition_count {
+            let log = self
+                .logs
+                .get(&(topic_id, p))
+                .cloned()
+                .unwrap_or_else(|| PartitionLog::with_max_records(cfg.max_records as usize));
+            out.extend_from_slice(&p.to_be_bytes());
+            out.extend_from_slice(&log.base_offset().to_be_bytes());
+            out.extend_from_slice(&log.next_offset().to_be_bytes());
+            out.extend_from_slice(&(log.len() as u32).to_be_bytes());
+        }
+        out
+    }
+
+    pub fn list_topics(&self) -> Vec<u8> {
+        let mut ids: Vec<u16> = self.topics.keys().copied().collect();
+        ids.sort_unstable();
+        let mut out = Vec::with_capacity(2 + ids.len() * 2);
+        out.extend_from_slice(&(ids.len() as u16).to_be_bytes());
+        for id in ids {
+            out.extend_from_slice(&id.to_be_bytes());
+        }
+        out
+    }
+
+    pub fn get_lag(&self, group_id: u16, topic_id: u16) -> Vec<u8> {
+        let cfg = self.topic_config(topic_id);
+        let mut out = Vec::new();
+        out.extend_from_slice(&cfg.partition_count.to_be_bytes());
+        for p in 0..cfg.partition_count {
+            let committed = self.committed_offset(group_id, topic_id, p).unwrap_or(0);
+            let log_end = self
+                .logs
+                .get(&(topic_id, p))
+                .map(|l| l.next_offset())
+                .unwrap_or(0);
+            let lag = log_end.saturating_sub(committed);
+            out.extend_from_slice(&p.to_be_bytes());
+            out.extend_from_slice(&committed.to_be_bytes());
+            out.extend_from_slice(&log_end.to_be_bytes());
+            out.extend_from_slice(&lag.to_be_bytes());
+        }
+        out
     }
 
     pub fn committed_offset(&self, group_id: u16, topic_id: u16, partition_id: u16) -> Option<u64> {
@@ -189,12 +345,7 @@ impl Broker {
     }
 
     pub fn produce_pcm(&mut self, topic_id: u16, payload: &[u8]) -> io::Result<(u8, u64)> {
-        // Append to the topic-partition log first (Phase 1 path).
-        self.ensure_log(topic_id, 0);
-        let log_offset = {
-            let log = self.logs.get_mut(&(topic_id, 0)).expect("log exists");
-            log.append(payload)
-        };
+        let log_offset = self.append_log(topic_id, 0, payload)?;
 
         let topic = self.topic_mut(topic_id)?;
 
@@ -387,6 +538,7 @@ pub async fn run_consumer_ready_and_send<R, W>(
 mod tests {
     use super::*;
     use crate::message::{ConsumerRegister, ProducerRegister};
+    use crate::topic_config::TopicConfig;
 
     fn setup() -> Broker {
         let mut broker = Broker::new();
@@ -549,5 +701,47 @@ mod tests {
             })
             .unwrap();
         assert_eq!(broker.committed_offset(7, 1, 0), Some(2));
+    }
+
+    #[test]
+    fn create_topic_and_describe() {
+        let mut broker = Broker::new();
+        let code = broker
+            .create_topic(TopicConfig::new(9, 2, 100))
+            .unwrap();
+        assert_eq!(code, 0);
+        let bytes = broker.describe_topic(9);
+        let partition_count = u16::from_be_bytes([bytes[0], bytes[1]]);
+        assert_eq!(partition_count, 2);
+    }
+
+    #[test]
+    fn partition_log_survives_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut broker = Broker::open(dir.path()).unwrap();
+            broker.append_log(4, 0, b"one").unwrap();
+            broker.append_log(4, 0, b"two").unwrap();
+        }
+        let mut broker = Broker::open(dir.path()).unwrap();
+        let records = broker.fetch_log(&FetchRequest {
+            topic_id: 4,
+            partition_id: 0,
+            offset: 0,
+            max_bytes: 1024,
+        });
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].payload, b"one".to_vec());
+        assert_eq!(records[1].payload, b"two".to_vec());
+    }
+
+    #[test]
+    fn get_lag_reflects_uncommitted_records() {
+        let mut broker = Broker::new();
+        broker.append_log(1, 0, b"x").unwrap();
+        broker.append_log(1, 0, b"y").unwrap();
+        let bytes = broker.get_lag(1, 1);
+        let lag = u64::from_be_bytes(bytes[20..28].try_into().unwrap());
+        assert_eq!(lag, 2);
     }
 }

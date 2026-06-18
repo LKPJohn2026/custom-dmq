@@ -1,13 +1,16 @@
 //! CLI entry point: `server`, `producer`, and `consumer` subcommands.
 
+mod admin;
 mod consumer_client;
 mod consumer_fetch;
+mod metrics_server;
 mod producer;
 mod producer_direct;
 
 use custom_dmq::broker::{broker_port, data_dir_from_env, run_consumer_ready_and_send, Broker};
 use custom_dmq::fetch_batch::encode_records;
 use custom_dmq::message::Message;
+use custom_dmq::topic_config::TopicConfig;
 use std::sync::Arc;
 use tokio::io::BufReader;
 use tokio::net::{TcpListener, TcpStream};
@@ -48,6 +51,7 @@ async fn main() {
             let group_id = parse_u16(&args, 3, "group_id");
             consumer_fetch::run(topic_id, group_id).await;
         }
+        "admin" => admin::run(&args).await,
         _ => {
             print_usage();
             std::process::exit(1);
@@ -62,7 +66,8 @@ fn print_usage() {
   custom-dmq producer <port> <topic_id> [--simulate]
   custom-dmq consumer <port> <topic_id> <group_id>
   custom-dmq produce <topic_id> [--simulate]
-  custom-dmq fetch <topic_id> <group_id>"
+  custom-dmq fetch <topic_id> <group_id>
+  custom-dmq admin create|describe|list|lag ..."
     );
 }
 
@@ -88,6 +93,12 @@ async fn run_server() {
     let broker: SharedBroker = Arc::new(Mutex::new(
         Broker::open(data_dir_from_env()).expect("failed to open broker data dir"),
     ));
+
+    let metrics = {
+        let guard = broker.lock().await;
+        guard.metrics()
+    };
+    tokio::spawn(metrics_server::run_metrics_server(metrics));
 
     loop {
         match listener.accept().await {
@@ -174,11 +185,57 @@ async fn handle_broker_connection(socket: TcpStream, broker: SharedBroker) {
             Message::RCommitOffset(0)
         }
         Message::Produce(req) => {
-            let (_, offset) = {
+            let offset = {
                 let mut b = broker.lock().await;
-                b.produce_pcm(req.topic_id, &req.payload).unwrap_or((1, 0))
+                match b.append_log(req.topic_id, req.partition_id, &req.payload) {
+                    Ok(o) => o,
+                    Err(e) => {
+                        eprintln!("[broker] produce failed: {e}");
+                        b.metrics().record_error();
+                        return;
+                    }
+                }
             };
             Message::RProduce(offset)
+        }
+        Message::CreateTopic(req) => {
+            let code = {
+                let mut b = broker.lock().await;
+                match b.create_topic(TopicConfig::new(
+                    req.topic_id,
+                    req.partition_count,
+                    req.max_records,
+                )) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!("[broker] create topic failed: {e}");
+                        b.metrics().record_error();
+                        return;
+                    }
+                }
+            };
+            Message::RCreateTopic(code)
+        }
+        Message::DescribeTopic(req) => {
+            let bytes = {
+                let b = broker.lock().await;
+                b.describe_topic(req.topic_id)
+            };
+            Message::RDescribeTopic(bytes)
+        }
+        Message::ListTopics => {
+            let bytes = {
+                let b = broker.lock().await;
+                b.list_topics()
+            };
+            Message::RListTopics(bytes)
+        }
+        Message::GetLag(req) => {
+            let bytes = {
+                let b = broker.lock().await;
+                b.get_lag(req.group_id, req.topic_id)
+            };
+            Message::RGetLag(bytes)
         }
         other => {
             eprintln!("[broker] Unexpected message on register port: {other:?}");
