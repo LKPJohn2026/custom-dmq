@@ -6,6 +6,7 @@ mod consumer_fetch;
 mod metrics_server;
 mod producer;
 mod producer_direct;
+mod request_log;
 
 use custom_dmq::broker::{broker_port, data_dir_from_env, run_consumer_ready_and_send, Broker};
 use custom_dmq::fetch_batch::encode_records;
@@ -119,24 +120,25 @@ async fn run_server() {
             Ok((socket, peer)) => {
                 println!("[broker] Connection from {peer}");
                 let broker = Arc::clone(&broker);
-                tokio::spawn(handle_broker_connection(socket, broker));
+                tokio::spawn(handle_broker_connection(socket, broker, peer.to_string()));
             }
             Err(e) => eprintln!("[broker] Accept error: {e}"),
         }
     }
 }
 
-async fn handle_broker_connection(socket: TcpStream, broker: SharedBroker) {
+async fn handle_broker_connection(socket: TcpStream, broker: SharedBroker, peer: String) {
     let (reader, mut writer) = socket.into_split();
     let mut buf = BufReader::new(reader);
 
     let message = match custom_dmq::message::read_message(&mut buf).await {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("[broker] Read error: {e}");
+            request_log::log_request_error("READ", &peer, &e.to_string());
             return;
         }
     };
+    request_log::log_request(request_log::request_name(&message), &peer);
 
     let response = match &message {
         Message::Echo(text) => {
