@@ -5,7 +5,9 @@ use crate::{
 };
 
 use custom_dmq::auth;
-use custom_dmq::broker::{broker_port, data_dir_from_env, run_consumer_ready_and_send, Broker};
+use custom_dmq::broker::{
+    bind_host, broker_port, data_dir_from_env, run_consumer_ready_and_send, Broker,
+};
 use custom_dmq::client;
 use custom_dmq::compression;
 use custom_dmq::fetch_batch::encode_records;
@@ -119,7 +121,7 @@ fn parse_u16(args: &[String], idx: usize, name: &str) -> u16 {
 }
 
 async fn run_server() {
-    let addr = format!("127.0.0.1:{}", broker_port());
+    let addr = custom_dmq::broker::bind_addr();
     let listener = TcpListener::bind(&addr).await.unwrap();
     if custom_dmq::tls::tls_enabled() {
         println!("[broker] Listening on {addr} (TLS enabled)");

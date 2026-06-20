@@ -37,6 +37,14 @@ use tokio::time::{sleep, Duration};
 pub const BROKER_PORT: u16 = 7777;
 pub const DEFAULT_DATA_DIR: &str = "dmq-data";
 
+pub fn bind_host() -> String {
+    std::env::var("DMQ_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1".to_string())
+}
+
+pub fn bind_addr() -> String {
+    format!("{}:{}", bind_host(), broker_port())
+}
+
 pub fn broker_addr() -> String {
     broker_addr_for(ClusterConfig::local_broker_id())
 }

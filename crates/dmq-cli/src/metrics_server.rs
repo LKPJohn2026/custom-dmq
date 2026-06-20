@@ -1,5 +1,6 @@
 //! Minimal HTTP server for metrics and operational probes.
 
+use custom_dmq::broker::bind_host;
 use custom_dmq::metrics::BrokerMetrics;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -24,7 +25,7 @@ impl OpsServer {
     }
 
     pub async fn run(self) {
-        let addr = format!("127.0.0.1:{}", metrics_port());
+        let addr = format!("{}:{}", bind_host(), metrics_port());
         let listener = match TcpListener::bind(&addr).await {
             Ok(l) => l,
             Err(e) => {

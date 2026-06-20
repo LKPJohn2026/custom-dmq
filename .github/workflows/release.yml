@@ -41,7 +41,7 @@ jobs:
       - name: Build and push container
         env:
           IMAGE_TAG: ${{ github.ref_name }}
-          IMAGE_REPO: ghcr.io/${{ github.repository }}
         run: |
+          IMAGE_REPO="ghcr.io/$(echo "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
           docker build -t "${IMAGE_REPO}:${IMAGE_TAG}" .
           docker push "${IMAGE_REPO}:${IMAGE_TAG}"
