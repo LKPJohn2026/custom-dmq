@@ -26,6 +26,7 @@ pub const IDEMPOTENT_PRODUCE: u8 = 14;
 pub const BROKER_HEARTBEAT: u8 = 15;
 pub const JOIN_GROUP: u8 = 16;
 pub const GROUP_HEARTBEAT: u8 = 17;
+pub const HANDSHAKE: u8 = 18;
 
 pub const R_ECHO: u8 = 101;
 pub const R_P_REG: u8 = 102;
@@ -44,6 +45,8 @@ pub const R_NOT_LEADER: u8 = 114;
 pub const R_BROKER_HEARTBEAT: u8 = 115;
 pub const R_JOIN_GROUP: u8 = 116;
 pub const R_GROUP_HEARTBEAT: u8 = 117;
+pub const R_HANDSHAKE: u8 = 118;
+pub const R_ERROR: u8 = 119;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProducerRegister {
@@ -64,6 +67,7 @@ pub struct FetchRequest {
     pub partition_id: u16,
     pub offset: u64,
     pub max_bytes: u32,
+    pub max_wait_ms: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,6 +140,12 @@ pub struct GroupHeartbeatRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandshakeRequest {
+    pub protocol_version: u16,
+    pub auth_token: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
     Echo(String),
     ProducerRegister(ProducerRegister),
@@ -154,6 +164,7 @@ pub enum Message {
     BrokerHeartbeat(BrokerHeartbeatRequest),
     JoinGroup(JoinGroupRequest),
     GroupHeartbeat(GroupHeartbeatRequest),
+    Handshake(HandshakeRequest),
     REcho(String),
     RProducerRegister(u8),
     RConsumerRegister(u8),
@@ -171,6 +182,8 @@ pub enum Message {
     RBrokerHeartbeat(u8),
     RJoinGroup(Vec<u8>),
     RGroupHeartbeat(u8, u8),
+    RHandshake(u8, u16),
+    RError(u8, String),
 }
 
 impl ProducerRegister {
@@ -313,13 +326,45 @@ pub fn encode_join_group_response(
     out
 }
 
+impl HandshakeRequest {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(4 + self.auth_token.len());
+        out.extend_from_slice(&self.protocol_version.to_be_bytes());
+        out.extend_from_slice(&(self.auth_token.len() as u16).to_be_bytes());
+        out.extend_from_slice(&self.auth_token);
+        out
+    }
+
+    pub fn decode(payload: &[u8]) -> io::Result<Self> {
+        if payload.len() < 4 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "HANDSHAKE payload too short",
+            ));
+        }
+        let protocol_version = u16::from_be_bytes([payload[0], payload[1]]);
+        let token_len = u16::from_be_bytes([payload[2], payload[3]]) as usize;
+        if payload.len() < 4 + token_len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "HANDSHAKE token truncated",
+            ));
+        }
+        Ok(HandshakeRequest {
+            protocol_version,
+            auth_token: payload[4..4 + token_len].to_vec(),
+        })
+    }
+}
+
 impl FetchRequest {
-    pub fn encode(&self) -> [u8; 16] {
-        let mut data = [0u8; 16];
+    pub fn encode(&self) -> Vec<u8> {
+        let mut data = vec![0u8; 20];
         data[0..2].copy_from_slice(&self.topic_id.to_be_bytes());
         data[2..4].copy_from_slice(&self.partition_id.to_be_bytes());
         data[4..12].copy_from_slice(&self.offset.to_be_bytes());
         data[12..16].copy_from_slice(&self.max_bytes.to_be_bytes());
+        data[16..20].copy_from_slice(&self.max_wait_ms.to_be_bytes());
         data
     }
 
@@ -330,6 +375,11 @@ impl FetchRequest {
                 "FETCH payload too short",
             ));
         }
+        let max_wait_ms = if payload.len() >= 20 {
+            u32::from_be_bytes([payload[16], payload[17], payload[18], payload[19]])
+        } else {
+            0
+        };
         Ok(FetchRequest {
             topic_id: u16::from_be_bytes([payload[0], payload[1]]),
             partition_id: u16::from_be_bytes([payload[2], payload[3]]),
@@ -344,6 +394,7 @@ impl FetchRequest {
                 payload[11],
             ]),
             max_bytes: u32::from_be_bytes([payload[12], payload[13], payload[14], payload[15]]),
+            max_wait_ms,
         })
     }
 }
@@ -579,6 +630,7 @@ pub fn parse_frame(body: &[u8]) -> io::Result<Message> {
         GROUP_HEARTBEAT => Ok(Message::GroupHeartbeat(GroupHeartbeatRequest::decode(
             payload,
         )?)),
+        HANDSHAKE => Ok(Message::Handshake(HandshakeRequest::decode(payload)?)),
         R_ECHO => Ok(Message::REcho(
             String::from_utf8_lossy(payload).into_owned(),
         )),
@@ -642,11 +694,125 @@ pub fn parse_frame(body: &[u8]) -> io::Result<Message> {
             let flag = payload.get(1).copied().unwrap_or(0);
             Ok(Message::RGroupHeartbeat(code, flag))
         }
+        R_HANDSHAKE => {
+            if payload.len() < 3 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "R_HANDSHAKE payload too short",
+                ));
+            }
+            Ok(Message::RHandshake(
+                payload[0],
+                u16::from_be_bytes([payload[1], payload[2]]),
+            ))
+        }
+        R_ERROR => {
+            let code = payload.first().copied().unwrap_or(0);
+            let msg = String::from_utf8_lossy(&payload[1..]).into_owned();
+            Ok(Message::RError(code, msg))
+        }
         other => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("unknown message type {other}"),
         )),
     }
+}
+
+pub fn encode_message(message: &Message) -> io::Result<Vec<u8>> {
+    let payload = match message {
+        Message::Echo(s) => s.as_bytes().to_vec(),
+        Message::ProducerRegister(reg) => reg.encode().to_vec(),
+        Message::ConsumerRegister(reg) => reg.encode().to_vec(),
+        Message::Pcm(bytes) => bytes.clone(),
+        Message::Fetch(req) => req.encode(),
+        Message::CommitOffset(req) => req.encode().to_vec(),
+        Message::Produce(req) => req.encode(),
+        Message::CreateTopic(req) => req.encode().to_vec(),
+        Message::DescribeTopic(req) => req.encode().to_vec(),
+        Message::ListTopics => Vec::new(),
+        Message::GetLag(req) => req.encode().to_vec(),
+        Message::Replicate(req) => req.encode(),
+        Message::GetCluster => Vec::new(),
+        Message::IdempotentProduce(req) => req.encode(),
+        Message::BrokerHeartbeat(req) => req.encode().to_vec(),
+        Message::JoinGroup(req) => req.encode(),
+        Message::GroupHeartbeat(req) => req.encode().to_vec(),
+        Message::Handshake(req) => req.encode(),
+        Message::REcho(s) => s.as_bytes().to_vec(),
+        Message::RProducerRegister(b) => vec![*b],
+        Message::RConsumerRegister(b) => vec![*b],
+        Message::RPcm(b) => vec![*b],
+        Message::RFetch(bytes) => bytes.clone(),
+        Message::RCommitOffset(b) => vec![*b],
+        Message::RProduce(offset) => offset.to_be_bytes().to_vec(),
+        Message::RCreateTopic(b) => vec![*b],
+        Message::RDescribeTopic(bytes) => bytes.clone(),
+        Message::RListTopics(bytes) => bytes.clone(),
+        Message::RGetLag(bytes) => bytes.clone(),
+        Message::RReplicate(b) => vec![*b],
+        Message::RGetCluster(bytes) => bytes.clone(),
+        Message::RNotLeader(id) => id.to_be_bytes().to_vec(),
+        Message::RBrokerHeartbeat(code) => vec![*code],
+        Message::RJoinGroup(bytes) => bytes.clone(),
+        Message::RGroupHeartbeat(code, flag) => vec![*code, *flag],
+        Message::RHandshake(code, version) => {
+            let mut out = vec![*code];
+            out.extend_from_slice(&version.to_be_bytes());
+            out
+        }
+        Message::RError(code, msg) => {
+            let mut out = vec![*code];
+            out.extend_from_slice(msg.as_bytes());
+            out
+        }
+    };
+    let msg_type = message_type_byte(message)?;
+    let mut out = Vec::with_capacity(1 + payload.len());
+    out.push(msg_type);
+    out.extend_from_slice(&payload);
+    Ok(out)
+}
+
+fn message_type_byte(message: &Message) -> io::Result<u8> {
+    Ok(match message {
+        Message::Echo(_) => ECHO,
+        Message::ProducerRegister(_) => P_REG,
+        Message::ConsumerRegister(_) => C_REG,
+        Message::Pcm(_) => PCM,
+        Message::Fetch(_) => FETCH,
+        Message::CommitOffset(_) => COMMIT,
+        Message::Produce(_) => PRODUCE,
+        Message::CreateTopic(_) => CREATE_TOPIC,
+        Message::DescribeTopic(_) => DESCRIBE_TOPIC,
+        Message::ListTopics => LIST_TOPICS,
+        Message::GetLag(_) => GET_LAG,
+        Message::Replicate(_) => REPLICATE,
+        Message::GetCluster => GET_CLUSTER,
+        Message::IdempotentProduce(_) => IDEMPOTENT_PRODUCE,
+        Message::BrokerHeartbeat(_) => BROKER_HEARTBEAT,
+        Message::JoinGroup(_) => JOIN_GROUP,
+        Message::GroupHeartbeat(_) => GROUP_HEARTBEAT,
+        Message::Handshake(_) => HANDSHAKE,
+        Message::REcho(_) => R_ECHO,
+        Message::RProducerRegister(_) => R_P_REG,
+        Message::RConsumerRegister(_) => R_C_REG,
+        Message::RPcm(_) => R_PCM,
+        Message::RFetch(_) => R_FETCH,
+        Message::RCommitOffset(_) => R_COMMIT,
+        Message::RProduce(_) => R_PRODUCE,
+        Message::RCreateTopic(_) => R_CREATE_TOPIC,
+        Message::RDescribeTopic(_) => R_DESCRIBE_TOPIC,
+        Message::RListTopics(_) => R_LIST_TOPICS,
+        Message::RGetLag(_) => R_GET_LAG,
+        Message::RReplicate(_) => R_REPLICATE,
+        Message::RGetCluster(_) => R_GET_CLUSTER,
+        Message::RNotLeader(_) => R_NOT_LEADER,
+        Message::RBrokerHeartbeat(_) => R_BROKER_HEARTBEAT,
+        Message::RJoinGroup(_) => R_JOIN_GROUP,
+        Message::RGroupHeartbeat(_, _) => R_GROUP_HEARTBEAT,
+        Message::RHandshake(_, _) => R_HANDSHAKE,
+        Message::RError(_, _) => R_ERROR,
+    })
 }
 
 pub async fn read_message<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<Message> {
@@ -656,57 +822,15 @@ pub async fn read_message<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<Me
     parse_frame(&body)
 }
 
-fn frame_bytes(msg_type: u8, payload: &[u8]) -> Vec<u8> {
-    let mut frame = Vec::with_capacity(2 + payload.len());
-    frame.push((payload.len() + 1) as u8);
-    frame.push(msg_type);
-    frame.extend_from_slice(payload);
-    frame
-}
-
 pub async fn write_message<W: AsyncWrite + Unpin>(
     writer: &mut W,
     message: &Message,
 ) -> io::Result<()> {
-    let frame = match message {
-        Message::Echo(s) => frame_bytes(ECHO, s.as_bytes()),
-        Message::ProducerRegister(reg) => frame_bytes(P_REG, &reg.encode()),
-        Message::ConsumerRegister(reg) => frame_bytes(C_REG, &reg.encode()),
-        Message::Pcm(bytes) => frame_bytes(PCM, bytes),
-        Message::Fetch(req) => frame_bytes(FETCH, &req.encode()),
-        Message::CommitOffset(req) => frame_bytes(COMMIT, &req.encode()),
-        Message::Produce(req) => frame_bytes(PRODUCE, &req.encode()),
-        Message::CreateTopic(req) => frame_bytes(CREATE_TOPIC, &req.encode()),
-        Message::DescribeTopic(req) => frame_bytes(DESCRIBE_TOPIC, &req.encode()),
-        Message::ListTopics => frame_bytes(LIST_TOPICS, &[]),
-        Message::GetLag(req) => frame_bytes(GET_LAG, &req.encode()),
-        Message::Replicate(req) => frame_bytes(REPLICATE, &req.encode()),
-        Message::GetCluster => frame_bytes(GET_CLUSTER, &[]),
-        Message::IdempotentProduce(req) => frame_bytes(IDEMPOTENT_PRODUCE, &req.encode()),
-        Message::BrokerHeartbeat(req) => frame_bytes(BROKER_HEARTBEAT, &req.encode()),
-        Message::JoinGroup(req) => frame_bytes(JOIN_GROUP, &req.encode()),
-        Message::GroupHeartbeat(req) => frame_bytes(GROUP_HEARTBEAT, &req.encode()),
-        Message::REcho(s) => frame_bytes(R_ECHO, s.as_bytes()),
-        Message::RProducerRegister(b) => frame_bytes(R_P_REG, &[*b]),
-        Message::RConsumerRegister(b) => frame_bytes(R_C_REG, &[*b]),
-        Message::RPcm(b) => frame_bytes(R_PCM, &[*b]),
-        Message::RFetch(bytes) => frame_bytes(R_FETCH, bytes),
-        Message::RCommitOffset(b) => frame_bytes(R_COMMIT, &[*b]),
-        Message::RProduce(offset) => frame_bytes(R_PRODUCE, &offset.to_be_bytes()),
-        Message::RCreateTopic(b) => frame_bytes(R_CREATE_TOPIC, &[*b]),
-        Message::RDescribeTopic(bytes) => frame_bytes(R_DESCRIBE_TOPIC, bytes),
-        Message::RListTopics(bytes) => frame_bytes(R_LIST_TOPICS, bytes),
-        Message::RGetLag(bytes) => frame_bytes(R_GET_LAG, bytes),
-        Message::RReplicate(b) => frame_bytes(R_REPLICATE, &[*b]),
-        Message::RGetCluster(bytes) => frame_bytes(R_GET_CLUSTER, bytes),
-        Message::RNotLeader(id) => frame_bytes(R_NOT_LEADER, &id.to_be_bytes()),
-        Message::RBrokerHeartbeat(code) => frame_bytes(R_BROKER_HEARTBEAT, &[*code]),
-        Message::RJoinGroup(bytes) => frame_bytes(R_JOIN_GROUP, bytes),
-        Message::RGroupHeartbeat(code, flag) => {
-            frame_bytes(R_GROUP_HEARTBEAT, &[*code, *flag])
-        }
-    };
-    writer.write_all(&frame).await?;
+    let frame = encode_message(message)?;
+    let mut wire = Vec::with_capacity(1 + frame.len());
+    wire.push(frame.len() as u8);
+    wire.extend_from_slice(&frame);
+    writer.write_all(&wire).await?;
     writer.flush().await
 }
 
@@ -757,6 +881,7 @@ mod tests {
             partition_id: 2,
             offset: 42,
             max_bytes: 4096,
+            max_wait_ms: 0,
         };
         let decoded = FetchRequest::decode(&req.encode()).unwrap();
         assert_eq!(req, decoded);
