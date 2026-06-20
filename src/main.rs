@@ -142,10 +142,11 @@ async fn run_server() {
     };
     tokio::spawn(metrics_server::run_metrics_server(metrics, data_dir));
 
-    if {
+    let cluster_background = {
         let guard = broker.lock().await;
         guard.cluster_state().is_some()
-    } {
+    };
+    if cluster_background {
         tokio::spawn(run_cluster_background(Arc::clone(&broker)));
     }
 
@@ -157,7 +158,9 @@ async fn run_server() {
                 if custom_dmq::tls::tls_enabled() {
                     tokio::spawn(async move {
                         match custom_dmq::tls::accept(socket).await {
-                            Ok(tls) => handle_broker_connection(tls, broker, peer.to_string()).await,
+                            Ok(tls) => {
+                                handle_broker_connection(tls, broker, peer.to_string()).await
+                            }
                             Err(e) => eprintln!("[broker] TLS accept failed: {e}"),
                         }
                     });
@@ -206,13 +209,15 @@ where
 
         {
             let b = broker.lock().await;
-            b.metrics().record_request_latency(started.elapsed().as_millis() as u64);
+            b.metrics()
+                .record_request_latency(started.elapsed().as_millis() as u64);
         }
 
         if matches!(frame.message, Message::Handshake(_)) {
             continue;
         }
-        if session.wire_format == WireFormat::V2 && session.protocol_version >= protocol::PROTOCOL_V2
+        if session.wire_format == WireFormat::V2
+            && session.protocol_version >= protocol::PROTOCOL_V2
         {
             continue;
         }
@@ -227,17 +232,15 @@ async fn dispatch_message(
     peer: &str,
 ) -> Option<Message> {
     match &frame.message {
-        Message::Handshake(req) => {
-            match client::process_handshake(req) {
-                Ok(version) => {
-                    session.handshaken = true;
-                    session.protocol_version = version;
-                    session.principal = auth::principal_from_token(&req.auth_token);
-                    Some(Message::RHandshake(0, version))
-                }
-                Err((code, msg)) => Some(Message::RError(code, msg)),
+        Message::Handshake(req) => match client::process_handshake(req) {
+            Ok(version) => {
+                session.handshaken = true;
+                session.protocol_version = version;
+                session.principal = auth::principal_from_token(&req.auth_token);
+                Some(Message::RHandshake(0, version))
             }
-        }
+            Err((code, msg)) => Some(Message::RError(code, msg)),
+        },
         Message::Echo(text) => {
             if protocol::require_handshake() && !session.handshaken {
                 return Some(Message::RError(1, "handshake required".into()));
@@ -328,9 +331,7 @@ async fn dispatch_message(
                         }
                     }
                 };
-                if !records.is_empty()
-                    || deadline.is_none()
-                    || Instant::now() >= deadline.unwrap()
+                if !records.is_empty() || deadline.is_none() || Instant::now() >= deadline.unwrap()
                 {
                     break records;
                 }
@@ -546,12 +547,7 @@ async fn dispatch_message(
         Message::Replicate(req) => {
             let code = {
                 let mut b = broker.lock().await;
-                match b.apply_replica(
-                    req.topic_id,
-                    req.partition_id,
-                    req.offset,
-                    &req.payload,
-                ) {
+                match b.apply_replica(req.topic_id, req.partition_id, req.offset, &req.payload) {
                     Ok(()) => 0u8,
                     Err(e) => {
                         eprintln!("[broker] replicate apply failed: {e}");
@@ -582,10 +578,7 @@ async fn dispatch_message(
                 match b.join_group(req) {
                     Ok((code, member_id, generation, parts)) => {
                         custom_dmq::message::encode_join_group_response(
-                            code,
-                            member_id,
-                            generation,
-                            &parts,
+                            code, member_id, generation, &parts,
                         )
                     }
                     Err(e) => {

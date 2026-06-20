@@ -110,7 +110,9 @@ async fn non_leader_returns_not_leader_on_produce() {
     let server = tokio::spawn(run_produce_server(Arc::clone(&broker), port));
     sleep(Duration::from_millis(50)).await;
 
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).await.unwrap();
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+        .await
+        .unwrap();
     message::write_message(
         &mut stream,
         &Message::Produce(ProduceRequest {
@@ -140,7 +142,9 @@ async fn get_cluster_returns_broker_metadata() {
     let server = tokio::spawn(run_cluster_server(Arc::clone(&broker), port));
     sleep(Duration::from_millis(50)).await;
 
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).await.unwrap();
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+        .await
+        .unwrap();
     message::write_message(&mut stream, &Message::GetCluster)
         .await
         .unwrap();
@@ -167,12 +171,8 @@ async fn run_replicate_server(broker: Arc<Mutex<Broker>>, port: u16) {
             Message::Replicate(req) => {
                 let code = {
                     let mut b = broker.lock().await;
-                    match b.apply_replica(
-                        req.topic_id,
-                        req.partition_id,
-                        req.offset,
-                        &req.payload,
-                    ) {
+                    match b.apply_replica(req.topic_id, req.partition_id, req.offset, &req.payload)
+                    {
                         Ok(()) => 0,
                         Err(_) => 1,
                     }
@@ -191,10 +191,9 @@ async fn run_produce_server(broker: Arc<Mutex<Broker>>, port: u16) {
             Message::Produce(req) => {
                 let b = broker.lock().await;
                 if b.cluster().is_some() && !b.is_partition_leader(req.topic_id, req.partition_id) {
-                    Some(Message::RNotLeader(b.partition_leader(
-                        req.topic_id,
-                        req.partition_id,
-                    )))
+                    Some(Message::RNotLeader(
+                        b.partition_leader(req.topic_id, req.partition_id),
+                    ))
                 } else {
                     None
                 }

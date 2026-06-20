@@ -275,8 +275,14 @@ impl JoinGroupRequest {
             group_id: u16::from_be_bytes([payload[0], payload[1]]),
             topic_id: u16::from_be_bytes([payload[2], payload[3]]),
             member_id: u64::from_be_bytes([
-                payload[4], payload[5], payload[6], payload[7], payload[8], payload[9],
-                payload[10], payload[11],
+                payload[4],
+                payload[5],
+                payload[6],
+                payload[7],
+                payload[8],
+                payload[9],
+                payload[10],
+                payload[11],
             ]),
         })
     }
@@ -552,8 +558,14 @@ impl ReplicateRequest {
             topic_id: u16::from_be_bytes([payload[0], payload[1]]),
             partition_id: u16::from_be_bytes([payload[2], payload[3]]),
             offset: u64::from_be_bytes([
-                payload[4], payload[5], payload[6], payload[7], payload[8], payload[9],
-                payload[10], payload[11],
+                payload[4],
+                payload[5],
+                payload[6],
+                payload[7],
+                payload[8],
+                payload[9],
+                payload[10],
+                payload[11],
             ]),
             payload: payload[14..14 + len].to_vec(),
         })
@@ -582,12 +594,24 @@ impl IdempotentProduceRequest {
             topic_id: u16::from_be_bytes([payload[0], payload[1]]),
             partition_id: u16::from_be_bytes([payload[2], payload[3]]),
             producer_id: u64::from_be_bytes([
-                payload[4], payload[5], payload[6], payload[7], payload[8], payload[9],
-                payload[10], payload[11],
+                payload[4],
+                payload[5],
+                payload[6],
+                payload[7],
+                payload[8],
+                payload[9],
+                payload[10],
+                payload[11],
             ]),
             sequence: u64::from_be_bytes([
-                payload[12], payload[13], payload[14], payload[15], payload[16], payload[17],
-                payload[18], payload[19],
+                payload[12],
+                payload[13],
+                payload[14],
+                payload[15],
+                payload[16],
+                payload[17],
+                payload[18],
+                payload[19],
             ]),
             payload: payload[20..].to_vec(),
         })
@@ -682,7 +706,9 @@ pub fn parse_frame(body: &[u8]) -> io::Result<Message> {
                     "R_NOT_LEADER payload too short",
                 ));
             }
-            Ok(Message::RNotLeader(u16::from_be_bytes([payload[0], payload[1]])))
+            Ok(Message::RNotLeader(u16::from_be_bytes([
+                payload[0], payload[1],
+            ])))
         }
         R_BROKER_HEARTBEAT => {
             let byte = payload.first().copied().unwrap_or(0);

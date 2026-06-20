@@ -2,11 +2,10 @@
 
 use custom_dmq::auth;
 use custom_dmq::client;
-use custom_dmq::message::{self, HandshakeRequest, Message};
+use custom_dmq::message::{HandshakeRequest, Message};
 use custom_dmq::protocol::{self, Frame, WireFormat};
 use std::sync::Arc;
 use tempfile::tempdir;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 

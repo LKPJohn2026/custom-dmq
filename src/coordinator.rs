@@ -69,10 +69,7 @@ impl GroupState {
             }
         }
         self.rebalance_pending = false;
-        let parts = assignments
-            .get(&assigned_id)
-            .cloned()
-            .unwrap_or_default();
+        let parts = assignments.get(&assigned_id).cloned().unwrap_or_default();
         Ok((assigned_id, self.generation, parts))
     }
 
@@ -110,11 +107,7 @@ impl GroupState {
         true
     }
 
-    pub fn rebalance(
-        &mut self,
-        topic_partition_count: u16,
-        now_ms: u64,
-    ) -> HashMap<u64, Vec<u16>> {
+    pub fn rebalance(&mut self, topic_partition_count: u16, now_ms: u64) -> HashMap<u64, Vec<u16>> {
         let assignments = range_assign(topic_partition_count, &self.members, self.generation);
         for (member_id, parts) in &assignments {
             if let Some(member) = self.members.get_mut(member_id) {

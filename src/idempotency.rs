@@ -47,10 +47,7 @@ impl IdempotencyState {
             if sequence > last_seq + 1 {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!(
-                        "sequence gap: expected {} got {sequence}",
-                        last_seq + 1
-                    ),
+                    format!("sequence gap: expected {} got {sequence}", last_seq + 1),
                 ));
             }
         } else if sequence != 0 {
@@ -87,7 +84,6 @@ impl IdempotencyState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
 
     #[test]
     fn duplicate_sequence_returns_cached_offset() {

@@ -67,7 +67,11 @@ impl OpsServer {
                 if self.data_dir.exists() {
                     ("200 OK", "text/plain", "ready".to_string())
                 } else {
-                    ("503 Service Unavailable", "text/plain", "not ready".to_string())
+                    (
+                        "503 Service Unavailable",
+                        "text/plain",
+                        "not ready".to_string(),
+                    )
                 }
             }
             _ => ("404 Not Found", "text/plain", "not found".to_string()),

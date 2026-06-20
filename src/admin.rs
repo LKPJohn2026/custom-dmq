@@ -2,9 +2,7 @@
 
 use custom_dmq::broker::broker_addr;
 use custom_dmq::cluster::ClusterConfig;
-use custom_dmq::message::{
-    self, CreateTopicRequest, DescribeTopicRequest, GetLagRequest, Message,
-};
+use custom_dmq::message::{self, CreateTopicRequest, DescribeTopicRequest, GetLagRequest, Message};
 use tokio::io::BufReader;
 use tokio::net::TcpStream;
 
@@ -39,14 +37,8 @@ fn print_usage() {
 
 async fn create_topic(args: &[String]) {
     let topic_id = parse_u16(args, 3, "topic_id");
-    let partition_count = args
-        .get(4)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1);
-    let max_records = args
-        .get(5)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(10_000);
+    let partition_count = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(1);
+    let max_records = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(10_000);
     let req = CreateTopicRequest {
         topic_id,
         partition_count,
@@ -131,11 +123,7 @@ async fn list_topics() {
 async fn get_lag(args: &[String]) {
     let group_id = parse_u16(args, 3, "group_id");
     let topic_id = parse_u16(args, 4, "topic_id");
-    let resp = roundtrip(Message::GetLag(GetLagRequest {
-        group_id,
-        topic_id,
-    }))
-    .await;
+    let resp = roundtrip(Message::GetLag(GetLagRequest { group_id, topic_id })).await;
     let Message::RGetLag(bytes) = resp else {
         eprintln!("unexpected response: {resp:?}");
         std::process::exit(1);
@@ -185,12 +173,10 @@ async fn show_cluster() {
 }
 
 async fn roundtrip(request: Message) -> Message {
-    let mut stream = TcpStream::connect(broker_addr())
-        .await
-        .unwrap_or_else(|e| {
-            eprintln!("could not connect to broker: {e}");
-            std::process::exit(1);
-        });
+    let mut stream = TcpStream::connect(broker_addr()).await.unwrap_or_else(|e| {
+        eprintln!("could not connect to broker: {e}");
+        std::process::exit(1);
+    });
     message::write_message(&mut stream, &request)
         .await
         .expect("write request");

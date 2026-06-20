@@ -17,7 +17,10 @@ use crate::message::{
     self, BrokerHeartbeatRequest, CommitOffsetRequest, ConsumerRegister, FetchRequest,
     GroupHeartbeatRequest, IdempotentProduceRequest, JoinGroupRequest, Message, ProducerRegister,
 };
-use crate::metadata::{load_committed_offset, load_topic_config, store_broker_topics, store_committed_offset, store_topic_config};
+use crate::metadata::{
+    load_committed_offset, load_topic_config, store_broker_topics, store_committed_offset,
+    store_topic_config,
+};
 use crate::metrics::BrokerMetrics;
 use crate::partition_log::{PartitionLog, Record};
 use crate::storage::{GroupId, PartitionIdx, Storage, TopicId};
@@ -267,18 +270,14 @@ impl Broker {
             .map(|b| format!("{}:{}", b.host, b.port))
     }
 
-    pub fn join_group(
-        &mut self,
-        req: &JoinGroupRequest,
-    ) -> io::Result<(u8, u64, u32, Vec<u16>)> {
+    pub fn join_group(&mut self, req: &JoinGroupRequest) -> io::Result<(u8, u64, u32, Vec<u16>)> {
         self.topic_mut(req.topic_id)?;
         let partition_count = self.topic_config(req.topic_id).partition_count;
         let key = (req.topic_id, req.group_id);
-        if !self.groups.contains_key(&key) {
-            self.groups
-                .insert(key, GroupState::new(req.group_id, req.topic_id));
-        }
-        let group = self.groups.get_mut(&key).expect("group inserted");
+        let group = self
+            .groups
+            .entry(key)
+            .or_insert_with(|| GroupState::new(req.group_id, req.topic_id));
         let (member_id, generation, parts) =
             group.join(req.member_id, partition_count, cluster_state::now_ms())?;
         Ok((0, member_id, generation, parts))
@@ -446,7 +445,12 @@ impl Broker {
         self.ensure_log_with_config(topic_id, partition_id);
     }
 
-    pub fn append_log(&mut self, topic_id: u16, partition_id: u16, payload: &[u8]) -> io::Result<u64> {
+    pub fn append_log(
+        &mut self,
+        topic_id: u16,
+        partition_id: u16,
+        payload: &[u8],
+    ) -> io::Result<u64> {
         limits::validate_produce_payload(payload.len())?;
         self.topic_mut(topic_id)?;
         self.ensure_log_with_config(topic_id, partition_id);
@@ -514,11 +518,7 @@ impl Broker {
         if offset > log.next_offset() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!(
-                    "replica gap: expected {} got {}",
-                    log.next_offset(),
-                    offset
-                ),
+                format!("replica gap: expected {} got {}", log.next_offset(), offset),
             ));
         }
         let assigned = log.append(payload);
@@ -540,9 +540,7 @@ impl Broker {
     }
 
     pub fn fetch_log(&mut self, req: &FetchRequest) -> io::Result<Vec<Record>> {
-        if self.cluster.is_some()
-            && !self.is_partition_replica(req.topic_id, req.partition_id)
-        {
+        if self.cluster.is_some() && !self.is_partition_replica(req.topic_id, req.partition_id) {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "broker is not a replica for partition",
@@ -556,8 +554,7 @@ impl Broker {
             .expect("log exists");
         let result = log.fetch(req.offset, max_bytes);
         let bytes: usize = result.records.iter().map(|r| r.payload.len()).sum();
-        self.metrics
-            .record_fetch(bytes, result.records.len());
+        self.metrics.record_fetch(bytes, result.records.len());
         Ok(result.records)
     }
 
@@ -1040,14 +1037,15 @@ mod tests {
         broker.produce_pcm(1, b"a").unwrap();
         broker.produce_pcm(1, b"bb").unwrap();
 
-        let records = broker.fetch_log(&FetchRequest {
-            topic_id: 1,
-            partition_id: 0,
-            offset: 0,
-            max_bytes: 1024,
-            max_wait_ms: 0,
-        })
-        .unwrap();
+        let records = broker
+            .fetch_log(&FetchRequest {
+                topic_id: 1,
+                partition_id: 0,
+                offset: 0,
+                max_bytes: 1024,
+                max_wait_ms: 0,
+            })
+            .unwrap();
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].payload, b"a".to_vec());
 
@@ -1065,9 +1063,7 @@ mod tests {
     #[test]
     fn create_topic_and_describe() {
         let mut broker = Broker::new();
-        let code = broker
-            .create_topic(TopicConfig::new(9, 2, 100))
-            .unwrap();
+        let code = broker.create_topic(TopicConfig::new(9, 2, 100)).unwrap();
         assert_eq!(code, 0);
         let bytes = broker.describe_topic(9);
         let partition_count = u16::from_be_bytes([bytes[0], bytes[1]]);

@@ -59,11 +59,7 @@ pub fn heartbeat_interval_ms() -> u64 {
 impl ClusterState {
     pub fn from_seed(seed: &ClusterConfig) -> Self {
         let now = now_ms();
-        let broker_last_seen_ms = seed
-            .brokers
-            .iter()
-            .map(|b| (b.id, now))
-            .collect();
+        let broker_last_seen_ms = seed.brokers.iter().map(|b| (b.id, now)).collect();
         Self {
             min_insync_replicas: seed.min_insync_replicas,
             brokers: seed.brokers.clone(),
@@ -165,11 +161,10 @@ impl ClusterState {
         let mut changed = Vec::new();
         for idx in dead_leaders {
             let assignment = &self.assignments[idx];
-            let Some(new_leader) = assignment
-                .replicas
-                .iter()
-                .copied()
-                .find(|id| *id != assignment.leader && self.broker_alive(*id, now_ms, timeout_ms))
+            let Some(new_leader) =
+                assignment.replicas.iter().copied().find(|id| {
+                    *id != assignment.leader && self.broker_alive(*id, now_ms, timeout_ms)
+                })
             else {
                 continue;
             };

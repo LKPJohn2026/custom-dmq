@@ -25,7 +25,8 @@ pub fn compress(data: &[u8]) -> io::Result<Vec<u8>> {
 }
 
 pub fn decompress(data: &[u8]) -> io::Result<Vec<u8>> {
-    lz4_flex::decompress(data, data.len() * 8).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    lz4_flex::decompress(data, data.len() * 8)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
 pub fn wrap_batch(codec: u8, payload: &[u8]) -> io::Result<Vec<u8>> {

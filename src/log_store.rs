@@ -22,18 +22,24 @@ pub fn append_record(
 ) -> io::Result<()> {
     std::fs::create_dir_all(data_dir)?;
     let path = log_data_path(data_dir, topic_id, partition_id);
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     let len = u16::try_from(record.payload.len()).map_err(|_| {
-        io::Error::new(io::ErrorKind::InvalidInput, "payload too large for log segment")
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "payload too large for log segment",
+        )
     })?;
     file.write_all(&record.offset.to_be_bytes())?;
     file.write_all(&len.to_be_bytes())?;
     file.write_all(&record.payload)?;
     fsync::maybe_sync_data(&file)?;
-    store_meta_offsets(data_dir, topic_id, partition_id, None, Some(record.offset + 1))
+    store_meta_offsets(
+        data_dir,
+        topic_id,
+        partition_id,
+        None,
+        Some(record.offset + 1),
+    )
 }
 
 pub fn store_meta_offsets(

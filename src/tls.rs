@@ -57,11 +57,15 @@ pub fn client_config() -> io::Result<Arc<ClientConfig>> {
     let mut roots = RootCertStore::empty();
     if let Ok(ca_path) = std::env::var("DMQ_TLS_CA") {
         for cert in load_certs(Path::new(&ca_path))? {
-            roots.add(cert).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            roots
+                .add(cert)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         }
     } else if let Ok(cert_path) = std::env::var("DMQ_TLS_CERT") {
         for cert in load_certs(Path::new(&cert_path))? {
-            roots.add(cert).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            roots
+                .add(cert)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         }
     }
     let config = ClientConfig::builder()
@@ -73,10 +77,7 @@ pub fn client_config() -> io::Result<Arc<ClientConfig>> {
 pub async fn accept(stream: TcpStream) -> io::Result<ServerTlsStream<TcpStream>> {
     let config = server_config()?;
     let acceptor = TlsAcceptor::from(config);
-    acceptor
-        .accept(stream)
-        .await
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+    acceptor.accept(stream).await.map_err(io::Error::other)
 }
 
 pub async fn connect(addr: &str) -> io::Result<tokio_rustls::client::TlsStream<TcpStream>> {
@@ -89,5 +90,5 @@ pub async fn connect(addr: &str) -> io::Result<tokio_rustls::client::TlsStream<T
     connector
         .connect(domain, stream)
         .await
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+        .map_err(io::Error::other)
 }

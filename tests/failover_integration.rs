@@ -45,8 +45,7 @@ fn three_broker_cluster(p1: u16, p2: u16, p3: u16) -> ClusterConfig {
 fn controller_failover_promotes_in_sync_follower() {
     let cluster = three_broker_cluster(7777, 7778, 7779);
     let dir = tempdir().unwrap();
-    let mut broker =
-        Broker::open_with_cluster_and_id(dir.path(), Some(cluster), 1).unwrap();
+    let mut broker = Broker::open_with_cluster_and_id(dir.path(), Some(cluster), 1).unwrap();
     broker.create_topic(TopicConfig::new(1, 2, 1000)).unwrap();
 
     let now = cluster_state::now_ms();
@@ -54,13 +53,15 @@ fn controller_failover_promotes_in_sync_follower() {
         let state = broker.cluster_state_mut().unwrap();
         state.record_heartbeat(2, now);
         state.record_heartbeat(3, now);
-        state.broker_last_seen_ms.insert(1, now.saturating_sub(20_000));
+        state
+            .broker_last_seen_ms
+            .insert(1, now.saturating_sub(20_000));
     }
     broker.run_failover_at(now).unwrap();
 
     assert_eq!(broker.partition_leader(1, 0), 2);
     assert_eq!(broker.cluster_state().unwrap().leader_epoch(1, 0), 2);
-    assert!(broker.is_partition_leader(1, 0) == false);
+    assert!(!broker.is_partition_leader(1, 0));
 }
 
 #[test]
@@ -73,7 +74,9 @@ fn stale_leader_rejected_after_failover_view_applied() {
     let mut follower =
         Broker::open_with_cluster_and_id(follower_dir.path(), Some(cluster), 2).unwrap();
 
-    controller.create_topic(TopicConfig::new(1, 1, 1000)).unwrap();
+    controller
+        .create_topic(TopicConfig::new(1, 1, 1000))
+        .unwrap();
     follower.create_topic(TopicConfig::new(1, 1, 1000)).unwrap();
 
     let now = cluster_state::now_ms();
@@ -81,7 +84,9 @@ fn stale_leader_rejected_after_failover_view_applied() {
         let state = controller.cluster_state_mut().unwrap();
         state.record_heartbeat(2, now);
         state.record_heartbeat(3, now);
-        state.broker_last_seen_ms.insert(1, now.saturating_sub(20_000));
+        state
+            .broker_last_seen_ms
+            .insert(1, now.saturating_sub(20_000));
     }
     controller.run_failover_at(now).unwrap();
 
@@ -222,7 +227,9 @@ async fn get_cluster_v2_includes_leader_epoch() {
     let server = tokio::spawn(run_cluster_server(Arc::clone(&broker), port));
     sleep(Duration::from_millis(50)).await;
 
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).await.unwrap();
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+        .await
+        .unwrap();
     message::write_message(&mut stream, &Message::GetCluster)
         .await
         .unwrap();

@@ -69,8 +69,7 @@ impl ClusterConfig {
     }
 
     pub fn leader_for(&self, topic_id: u16, partition_id: u16) -> Option<BrokerId> {
-        self.assignment(topic_id, partition_id)
-            .map(|a| a.leader)
+        self.assignment(topic_id, partition_id).map(|a| a.leader)
     }
 
     pub fn replicas_for(&self, topic_id: u16, partition_id: u16) -> Vec<BrokerId> {
@@ -84,7 +83,8 @@ impl ClusterConfig {
     }
 
     pub fn is_replica(&self, broker_id: BrokerId, topic_id: u16, partition_id: u16) -> bool {
-        self.replicas_for(topic_id, partition_id).contains(&broker_id)
+        self.replicas_for(topic_id, partition_id)
+            .contains(&broker_id)
     }
 
     pub fn leader_addr(&self, topic_id: u16, partition_id: u16) -> Option<String> {

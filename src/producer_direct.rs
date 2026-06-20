@@ -31,8 +31,15 @@ async fn simulate_loop(mut stream: TcpStream, topic_id: u16, idempotent: bool) {
         sleep(Duration::from_secs(1)).await;
         let line = format!("Hello from producer msg #{n}");
         n += 1;
-        if !write_produce(&mut stream, topic_id, idempotent, pid, n - 1, line.into_bytes())
-            .await
+        if !write_produce(
+            &mut stream,
+            topic_id,
+            idempotent,
+            pid,
+            n - 1,
+            line.into_bytes(),
+        )
+        .await
         {
             break;
         }

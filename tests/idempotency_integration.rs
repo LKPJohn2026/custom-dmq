@@ -13,9 +13,7 @@ use tokio::time::{sleep, Duration};
 async fn duplicate_idempotent_produce_returns_same_offset() {
     let port = pick_free_port();
     let dir = tempdir().unwrap();
-    let broker = Arc::new(Mutex::new(
-        Broker::open(dir.path()).expect("open broker"),
-    ));
+    let broker = Arc::new(Mutex::new(Broker::open(dir.path()).expect("open broker")));
     let server = tokio::spawn(run_idempotent_server(Arc::clone(&broker), port));
     sleep(Duration::from_millis(50)).await;
 

@@ -100,19 +100,18 @@ mod tests {
     #[test]
     fn apply_replica_is_idempotent() {
         let mut broker = Broker::new();
-        broker
-            .create_topic(TopicConfig::new(1, 1, 100))
+        broker.create_topic(TopicConfig::new(1, 1, 100)).unwrap();
+        broker.apply_replica(1, 0, 0, b"a").unwrap();
+        broker.apply_replica(1, 0, 0, b"a").unwrap();
+        let records = broker
+            .fetch_log(&crate::message::FetchRequest {
+                topic_id: 1,
+                partition_id: 0,
+                offset: 0,
+                max_bytes: 1024,
+                max_wait_ms: 0,
+            })
             .unwrap();
-        broker.apply_replica(1, 0, 0, b"a").unwrap();
-        broker.apply_replica(1, 0, 0, b"a").unwrap();
-        let records = broker.fetch_log(&crate::message::FetchRequest {
-            topic_id: 1,
-            partition_id: 0,
-            offset: 0,
-            max_bytes: 1024,
-            max_wait_ms: 0,
-        })
-        .unwrap();
         assert_eq!(records.len(), 1);
     }
 }

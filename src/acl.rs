@@ -53,7 +53,9 @@ impl Acl {
         if !self.is_configured() {
             return Ok(());
         }
-        if self.allowed.contains(&(principal.to_string(), op, topic_id))
+        if self
+            .allowed
+            .contains(&(principal.to_string(), op, topic_id))
             || self.allowed.contains(&(principal.to_string(), op, 0))
             || self.allowed.contains(&("*".to_string(), op, topic_id))
             || self.allowed.contains(&("*".to_string(), op, 0))
@@ -84,7 +86,7 @@ mod tests {
         acl.allowed
             .insert(("alice".to_string(), Operation::Produce, 1));
         assert!(acl.check("alice", Operation::Produce, 1).is_ok());
-        assert!(acl.check("bob", Operation::Produce, 1).is_err() == false);
+        assert!(acl.check("bob", Operation::Produce, 1).is_ok());
     }
 
     #[test]

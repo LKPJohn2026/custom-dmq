@@ -9,13 +9,15 @@ use tokio_rustls::client::TlsStream;
 
 pub enum ClientStream {
     Plain(TcpStream),
-    Tls(TlsStream<TcpStream>),
+    Tls(Box<TlsStream<TcpStream>>),
 }
 
 impl ClientStream {
     pub async fn connect(addr: &str) -> io::Result<Self> {
         if crate::tls::tls_enabled() {
-            Ok(ClientStream::Tls(crate::tls::connect(addr).await?))
+            Ok(ClientStream::Tls(Box::new(
+                crate::tls::connect(addr).await?,
+            )))
         } else {
             Ok(ClientStream::Plain(TcpStream::connect(addr).await?))
         }
@@ -36,7 +38,7 @@ impl ClientStream {
         self.write_frame(&frame, WireFormat::V2).await?;
         let (resp, _) = self.read_frame().await?;
         match resp.message {
-            Message::RHandshake(code, negotiated) if code == 0 => Ok(negotiated),
+            Message::RHandshake(0, negotiated) => Ok(negotiated),
             Message::RHandshake(code, _) => Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 format!("handshake rejected code={code}"),
@@ -53,7 +55,8 @@ impl ClientStream {
     }
 
     pub async fn write_message(&mut self, message: &Message) -> io::Result<()> {
-        self.write_frame(&Frame::v1(message.clone()), WireFormat::V1).await
+        self.write_frame(&Frame::v1(message.clone()), WireFormat::V1)
+            .await
     }
 
     pub async fn write_v2(&mut self, correlation_id: u32, message: &Message) -> io::Result<()> {

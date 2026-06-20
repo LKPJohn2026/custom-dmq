@@ -56,7 +56,7 @@ mod tests {
         let hits: Vec<bool> = (0..6)
             .map(|_| {
                 APPEND_COUNTER.fetch_add(1, Ordering::Relaxed);
-                APPEND_COUNTER.load(Ordering::Relaxed) % 3 == 0
+                APPEND_COUNTER.load(Ordering::Relaxed).is_multiple_of(3)
             })
             .collect();
         assert_eq!(hits, vec![false, false, true, false, false, true]);

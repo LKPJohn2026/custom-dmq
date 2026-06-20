@@ -85,7 +85,9 @@ pub fn load_all_idempotency(data_dir: &Path) -> io::Result<IdempotencyIndex> {
         let Some(name) = name.to_str() else {
             continue;
         };
-        let Some(rest) = name.strip_prefix("idempotency_").and_then(|s| s.strip_suffix(".dat"))
+        let Some(rest) = name
+            .strip_prefix("idempotency_")
+            .and_then(|s| s.strip_suffix(".dat"))
         else {
             continue;
         };
@@ -128,19 +130,13 @@ pub fn store_topic_config(
     write_u32(&mut file, 2, max_records)
 }
 
-pub fn load_topic_config(
-    data_dir: &Path,
-    topic_id: u16,
-) -> io::Result<Option<(u16, u32)>> {
+pub fn load_topic_config(data_dir: &Path, topic_id: u16) -> io::Result<Option<(u16, u32)>> {
     let path = topic_config_path(data_dir, topic_id);
     if !path.exists() {
         return Ok(None);
     }
     let mut file = File::open(path)?;
-    Ok(Some((
-        read_u16(&mut file, 0)?,
-        read_u32(&mut file, 2)?,
-    )))
+    Ok(Some((read_u16(&mut file, 0)?, read_u32(&mut file, 2)?)))
 }
 
 fn read_u32(file: &mut File, offset: u64) -> io::Result<u32> {
@@ -330,6 +326,7 @@ mod tests {
         assert_eq!(load_cgroup_partition_count(dir.path(), 1, 2).unwrap(), 3);
     }
 
+    #[test]
     fn idempotency_state_roundtrip() {
         let dir = tempdir().unwrap();
         store_idempotency_state(dir.path(), 1, 0, 99, 3, 42).unwrap();

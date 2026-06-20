@@ -59,8 +59,7 @@ pub fn negotiated_version_from_env() -> u16 {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(PROTOCOL_V2)
-        .min(MAX_PROTOCOL_VERSION)
-        .max(PROTOCOL_V1)
+        .clamp(PROTOCOL_V1, MAX_PROTOCOL_VERSION)
 }
 
 pub fn validate_protocol_version(requested: u16) -> Result<u16, u8> {
@@ -88,10 +87,7 @@ pub async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<(Fra
     } else {
         let length = first as usize;
         if length == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "empty v1 frame",
-            ));
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "empty v1 frame"));
         }
         let mut body = vec![0u8; length];
         reader.read_exact(&mut body).await?;
@@ -146,7 +142,6 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(
 mod tests {
     use super::*;
     use crate::message::{HandshakeRequest, Message};
-    use tokio::io::DuplexStream;
 
     async fn roundtrip(frame: Frame, format: WireFormat) -> Frame {
         let (mut client, mut server) = tokio::io::duplex(4096);
