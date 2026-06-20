@@ -3,6 +3,7 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
 COPY config ./config
+COPY src ./src
 RUN cargo build --release -p dmq-cli
 
 FROM debian:bookworm-slim

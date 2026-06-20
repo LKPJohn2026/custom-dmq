@@ -20,20 +20,26 @@ jobs:
         run: docker compose up -d broker-1 broker-2 broker-3
       - name: Wait for brokers
         run: |
-          for port in 7777 7778 7779; do
+          for port in 9080 9081 9082; do
+            ready=0
             for i in $(seq 1 30); do
-              if timeout 1 bash -c "echo >/dev/tcp/127.0.0.1/$port" 2>/dev/null; then
-                echo "broker on $port ready"
+              if curl -sf "http://127.0.0.1:${port}/ready" >/dev/null; then
+                echo "broker metrics on ${port} ready"
+                ready=1
                 break
               fi
               sleep 1
             done
+            if [ "$ready" -ne 1 ]; then
+              echo "broker on metrics port ${port} not ready"
+              exit 1
+            fi
           done
       - name: Produce and fetch roundtrip
         run: |
           cargo build --release -p dmq-cli
-          DMQ_BROKER_PORT=7777 ./target/release/dmq-produce 1 --simulate
-          ./target/release/dmq-consume 1 1 || true
+          DMQ_BROKER_PORT=7777 ./target/release/dmq-produce 1 --simulate --once
+          DMQ_BROKER_PORT=7777 ./target/release/dmq-consume 1 1 --once
       - name: Tear down
         if: always()
         run: docker compose down -v

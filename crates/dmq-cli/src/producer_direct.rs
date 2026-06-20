@@ -11,24 +11,29 @@ fn producer_id() -> u64 {
         .unwrap_or(1)
 }
 
-pub async fn run(topic_id: u16, simulate: bool, idempotent: bool) {
+pub async fn run(topic_id: u16, simulate: bool, idempotent: bool, once: bool) {
     let broker_addr = ClusterConfig::resolve_leader_addr(topic_id, 0);
     let stream = TcpStream::connect(&broker_addr)
         .await
         .expect("[produce] Could not connect to broker");
 
     if simulate {
-        simulate_loop(stream, topic_id, idempotent).await;
+        simulate_loop(stream, topic_id, idempotent, once).await;
     } else {
         stdin_loop(stream, topic_id, idempotent).await;
     }
 }
 
-async fn simulate_loop(mut stream: TcpStream, topic_id: u16, idempotent: bool) {
+async fn simulate_loop(mut stream: TcpStream, topic_id: u16, idempotent: bool, once: bool) {
     let mut n = 0u64;
     let pid = producer_id();
     loop {
-        sleep(Duration::from_secs(1)).await;
+        if n > 0 && once {
+            break;
+        }
+        if !once {
+            sleep(Duration::from_secs(1)).await;
+        }
         let line = format!("Hello from producer msg #{n}");
         n += 1;
         if !write_produce(

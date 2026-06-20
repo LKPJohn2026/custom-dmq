@@ -69,7 +69,8 @@ pub async fn run(args: Vec<String>) {
             let topic_id = parse_u16(&args, 2, "topic_id");
             let idempotent = args.iter().any(|s| s == "--idempotent");
             let simulate = args.iter().any(|s| s == "--simulate");
-            producer_direct::run(topic_id, simulate, idempotent).await;
+            let once = args.iter().any(|s| s == "--once");
+            producer_direct::run(topic_id, simulate, idempotent, once).await;
         }
         "consumer" => {
             let port = parse_u16(&args, 2, "port");
@@ -80,7 +81,8 @@ pub async fn run(args: Vec<String>) {
         "fetch" => {
             let topic_id = parse_u16(&args, 2, "topic_id");
             let group_id = parse_u16(&args, 3, "group_id");
-            consumer_fetch::run(topic_id, group_id).await;
+            let once = args.iter().any(|s| s == "--once");
+            consumer_fetch::run(topic_id, group_id, once).await;
         }
         "admin" => admin::run(&args).await,
         _ => {

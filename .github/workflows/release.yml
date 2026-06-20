@@ -41,7 +41,7 @@ jobs:
       - name: Build and push container
         env:
           IMAGE_TAG: ${{ github.ref_name }}
-          IMAGE_REPO: ghcr.io/${{ github.repository_owner }}/custom-dmq
+          IMAGE_REPO: ghcr.io/${{ github.repository }}
         run: |
           docker build -t "${IMAGE_REPO}:${IMAGE_TAG}" .
           docker push "${IMAGE_REPO}:${IMAGE_TAG}"

@@ -12,6 +12,7 @@ resolver = "2"
 [workspace.package]
 version = "2.0.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -23,7 +24,11 @@ serial_test = "3"
 name = "custom-dmq-integration"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 publish = false
+
+[lib]
+path = "src/lib.rs"
 
 [dev-dependencies]
 custom_dmq = { package = "dmq-broker", path = "crates/dmq-broker" }

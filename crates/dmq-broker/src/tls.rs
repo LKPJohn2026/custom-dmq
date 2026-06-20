@@ -1,10 +1,10 @@
 //! Optional TLS for broker and inter-broker TCP connections.
 
-use std::fs::File;
-use std::io::{self, BufReader};
+use std::io;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::net::TcpStream;
+use tokio_rustls::rustls::pki_types::pem::PemObject;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio_rustls::rustls::{ClientConfig, RootCertStore, ServerConfig};
 use tokio_rustls::server::TlsStream as ServerTlsStream;
@@ -18,23 +18,14 @@ pub fn tls_enabled() -> bool {
 }
 
 fn load_certs(path: &Path) -> io::Result<Vec<CertificateDer<'static>>> {
-    let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
-    rustls_pemfile::certs(&mut reader)
+    CertificateDer::pem_file_iter(path)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
 fn load_key(path: &Path) -> io::Result<PrivateKeyDer<'static>> {
-    let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
-    let keys = rustls_pemfile::pkcs8_private_keys(&mut reader)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    keys.into_iter()
-        .next()
-        .map(PrivateKeyDer::Pkcs8)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no private key found"))
+    PrivateKeyDer::from_pem_file(path).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
 pub fn server_config() -> io::Result<Arc<ServerConfig>> {

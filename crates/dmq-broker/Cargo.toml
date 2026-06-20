@@ -2,6 +2,7 @@
 name = "dmq-broker"
 version = "2.0.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
 
 [lib]
 name = "custom_dmq"
@@ -13,7 +14,6 @@ dmq-protocol = { path = "../dmq-protocol" }
 dmq-storage = { path = "../dmq-storage" }
 tokio = { version = "1", features = ["full"] }
 rustls = "0.23"
-rustls-pemfile = "2"
 rustls-pki-types = "1"
 tokio-rustls = "0.26"
 tempfile = "3"
