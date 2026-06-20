@@ -6,6 +6,7 @@
 //! readiness with R_PCM and receive the next message from their assigned partition.
 //! Queue data and metadata are persisted under a configurable data directory.
 
+use crate::cluster::{BrokerId, ClusterConfig};
 use crate::limits;
 use crate::log_store;
 use crate::message::{
@@ -29,11 +30,28 @@ pub const BROKER_PORT: u16 = 7777;
 pub const DEFAULT_DATA_DIR: &str = "dmq-data";
 
 pub fn broker_addr() -> String {
+    broker_addr_for(ClusterConfig::local_broker_id())
+}
+
+pub fn broker_addr_for(broker_id: BrokerId) -> String {
+    if let Ok(Some(cfg)) = ClusterConfig::from_env() {
+        if let Some(addr) = cfg.broker_addr(broker_id) {
+            return addr;
+        }
+    }
     let port = std::env::var("DMQ_BROKER_PORT")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(BROKER_PORT as u32) as u16;
     format!("127.0.0.1:{port}")
+}
+
+pub fn broker_id() -> BrokerId {
+    ClusterConfig::local_broker_id()
+}
+
+pub fn cluster_config_from_env() -> io::Result<Option<ClusterConfig>> {
+    ClusterConfig::from_env()
 }
 
 pub fn broker_port() -> u16 {
@@ -56,6 +74,8 @@ pub struct Broker {
     committed_offsets: HashMap<(u16, u16, u16), u64>,
     data_dir: PathBuf,
     metrics: Arc<BrokerMetrics>,
+    broker_id: BrokerId,
+    cluster: Option<ClusterConfig>,
     _temp_dir: Option<tempfile::TempDir>,
 }
 
@@ -81,6 +101,8 @@ impl Broker {
                 );
             }
         }
+        let broker_id = ClusterConfig::local_broker_id();
+        let cluster = ClusterConfig::from_env()?;
         let mut broker = Broker {
             topics,
             logs: HashMap::new(),
@@ -88,6 +110,8 @@ impl Broker {
             committed_offsets: HashMap::new(),
             data_dir,
             metrics: Arc::new(BrokerMetrics::new()),
+            broker_id,
+            cluster,
             _temp_dir: None,
         };
         broker.load_logs()?;
@@ -112,6 +136,48 @@ impl Broker {
 
     pub fn metrics(&self) -> Arc<BrokerMetrics> {
         Arc::clone(&self.metrics)
+    }
+
+    pub fn broker_id(&self) -> BrokerId {
+        self.broker_id
+    }
+
+    pub fn cluster(&self) -> Option<&ClusterConfig> {
+        self.cluster.as_ref()
+    }
+
+    pub fn partition_leader(&self, topic_id: u16, partition_id: u16) -> BrokerId {
+        self.cluster
+            .as_ref()
+            .and_then(|c| c.leader_for(topic_id, partition_id))
+            .unwrap_or(self.broker_id)
+    }
+
+    pub fn partition_replicas(&self, topic_id: u16, partition_id: u16) -> Vec<BrokerId> {
+        self.cluster
+            .as_ref()
+            .map(|c| c.replicas_for(topic_id, partition_id))
+            .unwrap_or_else(|| vec![self.broker_id])
+    }
+
+    pub fn is_partition_leader(&self, topic_id: u16, partition_id: u16) -> bool {
+        self.partition_leader(topic_id, partition_id) == self.broker_id
+    }
+
+    pub fn cluster_info_bytes(&self) -> Vec<u8> {
+        match &self.cluster {
+            Some(cfg) => cfg.encode(),
+            None => ClusterConfig {
+                min_insync_replicas: 1,
+                brokers: vec![crate::cluster::BrokerNode {
+                    id: self.broker_id,
+                    host: "127.0.0.1".into(),
+                    port: broker_port(),
+                }],
+                assignments: Vec::new(),
+            }
+            .encode(),
+        }
     }
 
     fn topic_config(&self, topic_id: u16) -> TopicConfig {
@@ -260,10 +326,17 @@ impl Broker {
                 .get(&(topic_id, p))
                 .cloned()
                 .unwrap_or_else(|| PartitionLog::with_max_records(cfg.max_records as usize));
+            let leader = self.partition_leader(topic_id, p);
+            let replicas = self.partition_replicas(topic_id, p);
             out.extend_from_slice(&p.to_be_bytes());
             out.extend_from_slice(&log.base_offset().to_be_bytes());
             out.extend_from_slice(&log.next_offset().to_be_bytes());
             out.extend_from_slice(&(log.len() as u32).to_be_bytes());
+            out.extend_from_slice(&leader.to_be_bytes());
+            out.extend_from_slice(&(replicas.len() as u16).to_be_bytes());
+            for r in &replicas {
+                out.extend_from_slice(&r.to_be_bytes());
+            }
         }
         out
     }
@@ -713,6 +786,8 @@ mod tests {
         let bytes = broker.describe_topic(9);
         let partition_count = u16::from_be_bytes([bytes[0], bytes[1]]);
         assert_eq!(partition_count, 2);
+        let leader = u16::from_be_bytes([bytes[24], bytes[25]]);
+        assert_eq!(leader, broker.broker_id());
     }
 
     #[test]

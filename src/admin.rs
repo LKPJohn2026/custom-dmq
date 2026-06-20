@@ -79,15 +79,27 @@ async fn describe_topic(args: &[String]) {
     println!("topic {topic_id}: {partition_count} partition(s)");
     let mut offset = 2usize;
     for _ in 0..partition_count {
-        if offset + 18 > bytes.len() {
+        if offset + 26 > bytes.len() {
             break;
         }
         let pid = u16::from_be_bytes([bytes[offset], bytes[offset + 1]]);
         let base = u64::from_be_bytes(bytes[offset + 2..offset + 10].try_into().unwrap());
         let next = u64::from_be_bytes(bytes[offset + 10..offset + 18].try_into().unwrap());
         let count = u32::from_be_bytes(bytes[offset + 18..offset + 22].try_into().unwrap());
-        println!("  partition {pid}: base={base} next={next} records={count}");
-        offset += 22;
+        let leader = u16::from_be_bytes([bytes[offset + 22], bytes[offset + 23]]);
+        let replica_count = u16::from_be_bytes([bytes[offset + 24], bytes[offset + 25]]) as usize;
+        let mut replicas = Vec::new();
+        for i in 0..replica_count {
+            let start = offset + 26 + i * 2;
+            if start + 2 > bytes.len() {
+                break;
+            }
+            replicas.push(u16::from_be_bytes([bytes[start], bytes[start + 1]]));
+        }
+        println!(
+            "  partition {pid}: base={base} next={next} records={count} leader={leader} replicas={replicas:?}"
+        );
+        offset += 26 + replica_count * 2;
     }
 }
 
