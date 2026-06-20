@@ -12,6 +12,7 @@ pub mod metrics;
 pub mod mmap_queue;
 pub mod partition;
 pub mod partition_log;
+pub mod replication;
 pub mod storage;
 pub mod topic;
 pub mod topic_config;

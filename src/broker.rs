@@ -267,6 +267,50 @@ impl Broker {
         Ok(offset)
     }
 
+    pub fn apply_replica(
+        &mut self,
+        topic_id: u16,
+        partition_id: u16,
+        offset: u64,
+        payload: &[u8],
+    ) -> io::Result<()> {
+        if let Some(cluster) = &self.cluster {
+            if !cluster.is_replica(self.broker_id, topic_id, partition_id) {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "broker is not a replica for partition",
+                ));
+            }
+        }
+        self.ensure_log_with_config(topic_id, partition_id);
+        let log = self
+            .logs
+            .get_mut(&(topic_id, partition_id))
+            .expect("log exists");
+        if offset < log.next_offset() {
+            return Ok(());
+        }
+        if offset > log.next_offset() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "replica gap: expected {} got {}",
+                    log.next_offset(),
+                    offset
+                ),
+            ));
+        }
+        let assigned = log.append(payload);
+        debug_assert_eq!(assigned, offset);
+        let record = Record {
+            offset,
+            payload: payload.to_vec(),
+        };
+        log_store::append_record(&self.data_dir, topic_id, partition_id, &record)?;
+        self.persist_log_meta(topic_id, partition_id)?;
+        Ok(())
+    }
+
     pub fn fetch_log(&mut self, req: &FetchRequest) -> Vec<Record> {
         self.ensure_log(req.topic_id, req.partition_id);
         let max_bytes = limits::clamp_fetch_bytes(req.max_bytes) as usize;

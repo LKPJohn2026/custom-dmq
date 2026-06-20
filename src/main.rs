@@ -237,6 +237,32 @@ async fn handle_broker_connection(socket: TcpStream, broker: SharedBroker) {
             };
             Message::RGetLag(bytes)
         }
+        Message::Replicate(req) => {
+            let code = {
+                let mut b = broker.lock().await;
+                match b.apply_replica(
+                    req.topic_id,
+                    req.partition_id,
+                    req.offset,
+                    &req.payload,
+                ) {
+                    Ok(()) => 0u8,
+                    Err(e) => {
+                        eprintln!("[broker] replicate apply failed: {e}");
+                        b.metrics().record_error();
+                        1u8
+                    }
+                }
+            };
+            Message::RReplicate(code)
+        }
+        Message::GetCluster => {
+            let bytes = {
+                let b = broker.lock().await;
+                b.cluster_info_bytes()
+            };
+            Message::RGetCluster(bytes)
+        }
         other => {
             eprintln!("[broker] Unexpected message on register port: {other:?}");
             return;
