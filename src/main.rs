@@ -103,15 +103,16 @@ async fn run_server() {
     let listener = TcpListener::bind(&addr).await.unwrap();
     println!("[broker] Listening on {addr}");
 
+    let data_dir = data_dir_from_env();
     let broker: SharedBroker = Arc::new(Mutex::new(
-        Broker::open(data_dir_from_env()).expect("failed to open broker data dir"),
+        Broker::open(&data_dir).expect("failed to open broker data dir"),
     ));
 
     let metrics = {
         let guard = broker.lock().await;
         guard.metrics()
     };
-    tokio::spawn(metrics_server::run_metrics_server(metrics));
+    tokio::spawn(metrics_server::run_metrics_server(metrics, data_dir));
 
     loop {
         match listener.accept().await {
