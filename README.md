@@ -49,6 +49,7 @@ Design notes: [`docs/architecture.md`](docs/architecture.md).
 | **Persistence (mmap)** | Queue contents + metadata are stored under `DMQ_DATA_DIR` using mmap files; survives broker restart. |
 | **Tests** | Unit tests for queue/metadata invariants + integration tests for TCP delivery + persistence recovery. |
 | **Pull-based API (Phase 1)** | `produce`/`fetch` commands use `PRODUCE` + `FETCH` + `COMMIT` on the broker port, backed by an append-only log. |
+| **Multi-broker cluster (Phase 3)** | Static TOML cluster config, leader/follower replication, `GET_CLUSTER` metadata, and leader-aware client routing. |
 
 ### Consistency model
 
@@ -103,6 +104,30 @@ cargo run -- produce 1 --simulate
 cargo run -- fetch 1 1
 ```
 
+### Multi-broker cluster (3 brokers, RF=3)
+
+Use `config/cluster.example.toml` and start one broker per node:
+
+```bash
+DMQ_BROKER_ID=1 DMQ_BROKER_PORT=7777 DMQ_DATA_DIR=dmq-data-1 \
+  DMQ_CLUSTER_CONFIG=config/cluster.example.toml cargo run -- server
+
+DMQ_BROKER_ID=2 DMQ_BROKER_PORT=7778 DMQ_DATA_DIR=dmq-data-2 \
+  DMQ_CLUSTER_CONFIG=config/cluster.example.toml cargo run -- server
+
+DMQ_BROKER_ID=3 DMQ_BROKER_PORT=7779 DMQ_DATA_DIR=dmq-data-3 \
+  DMQ_CLUSTER_CONFIG=config/cluster.example.toml cargo run -- server
+```
+
+Produce and fetch route to the partition leader automatically when `DMQ_CLUSTER_CONFIG` is set:
+
+```bash
+DMQ_CLUSTER_CONFIG=config/cluster.example.toml cargo run -- produce 1 --simulate
+DMQ_CLUSTER_CONFIG=config/cluster.example.toml cargo run -- admin cluster
+```
+
+Set `DMQ_ACKS=all` to require `min_insync_replicas` followers to ack before produce succeeds.
+
 ---
 
 ## Configuration
@@ -112,7 +137,13 @@ All config is via env vars:
 | Variable | Default | Purpose |
 |---------|---------|---------|
 | `DMQ_BROKER_PORT` | `7777` | Broker registration port |
+| `DMQ_BROKER_ID` | `1` | Broker identity in a cluster |
 | `DMQ_DATA_DIR` | `dmq-data` | Persistence directory for mmap + metadata |
+| `DMQ_CLUSTER_CONFIG` | _(unset)_ | Path to static cluster TOML (brokers + assignments) |
+| `DMQ_ACKS` | `leader` | Produce ack policy: `leader` or `all` |
+| `DMQ_METRICS_PORT` | `9080` | Prometheus `/metrics` HTTP port |
+| `DMQ_MAX_PAYLOAD_BYTES` | `255` | Max produce payload size |
+| `DMQ_MAX_FETCH_BYTES` | `65536` | Max fetch response size |
 
 ---
 

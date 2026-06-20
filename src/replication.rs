@@ -94,7 +94,6 @@ pub fn local_broker_id() -> BrokerId {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::broker::Broker;
     use crate::topic_config::TopicConfig;
 

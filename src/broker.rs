@@ -87,6 +87,22 @@ impl Default for Broker {
 
 impl Broker {
     pub fn open(data_dir: impl AsRef<Path>) -> io::Result<Self> {
+        Self::open_with_cluster(data_dir, ClusterConfig::from_env()?)
+    }
+
+    pub fn open_with_cluster(
+        data_dir: impl AsRef<Path>,
+        cluster: Option<ClusterConfig>,
+    ) -> io::Result<Self> {
+        let broker_id = ClusterConfig::local_broker_id();
+        Self::open_with_cluster_and_id(data_dir, cluster, broker_id)
+    }
+
+    pub fn open_with_cluster_and_id(
+        data_dir: impl AsRef<Path>,
+        cluster: Option<ClusterConfig>,
+        broker_id: BrokerId,
+    ) -> io::Result<Self> {
         let data_dir = data_dir.as_ref().to_path_buf();
         std::fs::create_dir_all(&data_dir)?;
         let topic_ids = crate::metadata::load_broker_topics(&data_dir)?;
@@ -101,8 +117,6 @@ impl Broker {
                 );
             }
         }
-        let broker_id = ClusterConfig::local_broker_id();
-        let cluster = ClusterConfig::from_env()?;
         let mut broker = Broker {
             topics,
             logs: HashMap::new(),
