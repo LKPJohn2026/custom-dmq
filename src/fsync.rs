@@ -32,7 +32,9 @@ pub fn should_fsync_after_append() -> bool {
     match fsync_policy_from_env() {
         FsyncPolicy::Always => true,
         FsyncPolicy::Never => false,
-        FsyncPolicy::EveryN(n) => APPEND_COUNTER.fetch_add(1, Ordering::Relaxed) % n == 0,
+        FsyncPolicy::EveryN(n) => APPEND_COUNTER
+            .fetch_add(1, Ordering::Relaxed)
+            .is_multiple_of(n),
     }
 }
 

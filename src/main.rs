@@ -79,7 +79,7 @@ fn print_usage() {
   custom-dmq server
   custom-dmq producer <port> <topic_id> [--simulate]
   custom-dmq consumer <port> <topic_id> <group_id>
-  custom-dmq produce <topic_id> [--simulate]
+  custom-dmq produce <topic_id> [--simulate] [--idempotent]
   custom-dmq fetch <topic_id> <group_id>
   custom-dmq admin create|describe|list|lag ..."
     );

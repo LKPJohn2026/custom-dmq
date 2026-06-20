@@ -72,9 +72,9 @@ pub fn load_idempotency_state(
     Ok(Some((read_u64(&mut file, 0)?, read_u64(&mut file, 8)?)))
 }
 
-pub fn load_all_idempotency(
-    data_dir: &Path,
-) -> io::Result<std::collections::HashMap<(u16, u16, u64), (u64, u64)>> {
+pub type IdempotencyIndex = std::collections::HashMap<(u16, u16, u64), (u64, u64)>;
+
+pub fn load_all_idempotency(data_dir: &Path) -> io::Result<IdempotencyIndex> {
     let mut out = std::collections::HashMap::new();
     if !data_dir.exists() {
         return Ok(out);

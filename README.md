@@ -50,6 +50,7 @@ Design notes: [`docs/architecture.md`](docs/architecture.md).
 | **Tests** | Unit tests for queue/metadata invariants + integration tests for TCP delivery + persistence recovery. |
 | **Pull-based API (Phase 1)** | `produce`/`fetch` commands use `PRODUCE` + `FETCH` + `COMMIT` on the broker port, backed by an append-only log. |
 | **Multi-broker cluster (Phase 3)** | Static TOML cluster config, leader/follower replication, `GET_CLUSTER` metadata, and leader-aware client routing. |
+| **Production polish (Phase 4)** | Configurable fsync, idempotent produce, health/readiness probes, Docker Compose, and Kubernetes manifests. |
 
 ### Consistency model
 
@@ -128,6 +129,28 @@ DMQ_CLUSTER_CONFIG=config/cluster.example.toml cargo run -- admin cluster
 
 Set `DMQ_ACKS=all` to require `min_insync_replicas` followers to ack before produce succeeds.
 
+### Idempotent produce (at-least-once retries)
+
+```bash
+DMQ_PRODUCER_ID=1 cargo run -- produce 1 --idempotent --simulate
+```
+
+Duplicate `(producer_id, sequence)` pairs return the original offset without re-appending.
+
+### Docker Compose (3 brokers)
+
+```bash
+docker compose up --build
+curl http://127.0.0.1:9080/health
+curl http://127.0.0.1:9080/ready
+```
+
+### Kubernetes
+
+```bash
+kubectl apply -f deploy/k8s/
+```
+
 ---
 
 ## Configuration
@@ -141,7 +164,9 @@ All config is via env vars:
 | `DMQ_DATA_DIR` | `dmq-data` | Persistence directory for mmap + metadata |
 | `DMQ_CLUSTER_CONFIG` | _(unset)_ | Path to static cluster TOML (brokers + assignments) |
 | `DMQ_ACKS` | `leader` | Produce ack policy: `leader` or `all` |
-| `DMQ_METRICS_PORT` | `9080` | Prometheus `/metrics` HTTP port |
+| `DMQ_FSYNC` | `always` | Durability policy: `always`, `never`, or `every:N` |
+| `DMQ_PRODUCER_ID` | `1` | Producer id for `--idempotent` produce |
+| `DMQ_METRICS_PORT` | `9080` | Ops HTTP port (`/metrics`, `/health`, `/ready`) |
 | `DMQ_MAX_PAYLOAD_BYTES` | `255` | Max produce payload size |
 | `DMQ_MAX_FETCH_BYTES` | `65536` | Max fetch response size |
 
