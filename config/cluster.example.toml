@@ -1,0 +1,40 @@
+# Static 3-broker cluster example for Phase 3.
+# Start brokers with:
+#   DMQ_BROKER_ID=1 DMQ_BROKER_PORT=7777 DMQ_DATA_DIR=dmq-data-1 DMQ_CLUSTER_CONFIG=config/cluster.example.toml cargo run -- server
+#   DMQ_BROKER_ID=2 DMQ_BROKER_PORT=7778 DMQ_DATA_DIR=dmq-data-2 DMQ_CLUSTER_CONFIG=config/cluster.example.toml cargo run -- server
+#   DMQ_BROKER_ID=3 DMQ_BROKER_PORT=7779 DMQ_DATA_DIR=dmq-data-3 DMQ_CLUSTER_CONFIG=config/cluster.example.toml cargo run -- server
+
+min_insync_replicas = 2
+
+[[brokers]]
+id = 1
+host = "127.0.0.1"
+port = 7777
+
+[[brokers]]
+id = 2
+host = "127.0.0.1"
+port = 7778
+
+[[brokers]]
+id = 3
+host = "127.0.0.1"
+port = 7779
+
+[[assignments]]
+topic_id = 1
+partition_id = 0
+leader = 1
+replicas = [1, 2, 3]
+
+[[assignments]]
+topic_id = 1
+partition_id = 1
+leader = 2
+replicas = [2, 3, 1]
+
+[[assignments]]
+topic_id = 1
+partition_id = 2
+leader = 3
+replicas = [3, 1, 2]
