@@ -7,6 +7,7 @@
 //! Queue data and metadata are persisted under a configurable data directory.
 
 use crate::cluster::{BrokerId, ClusterConfig};
+use crate::cluster_state::ClusterState;
 use crate::idempotency::{IdempotencyAction, IdempotencyState};
 use crate::limits;
 use crate::log_store;
@@ -78,6 +79,7 @@ pub struct Broker {
     metrics: Arc<BrokerMetrics>,
     broker_id: BrokerId,
     cluster: Option<ClusterConfig>,
+    cluster_state: Option<ClusterState>,
     idempotency: IdempotencyState,
     _temp_dir: Option<tempfile::TempDir>,
 }
@@ -120,6 +122,14 @@ impl Broker {
                 );
             }
         }
+        let (cluster, cluster_state) = match cluster {
+            Some(seed) => {
+                let state = ClusterState::open_or_bootstrap(&data_dir, &seed)?;
+                let live = state.to_cluster_config();
+                (Some(live), Some(state))
+            }
+            None => (None, None),
+        };
         let mut broker = Broker {
             topics,
             logs: HashMap::new(),
@@ -129,6 +139,7 @@ impl Broker {
             metrics: Arc::new(BrokerMetrics::new()),
             broker_id,
             cluster,
+            cluster_state,
             idempotency: IdempotencyState::load(&data_dir)?,
             _temp_dir: None,
         };
@@ -164,6 +175,23 @@ impl Broker {
         self.cluster.as_ref()
     }
 
+    pub fn cluster_state(&self) -> Option<&ClusterState> {
+        self.cluster_state.as_ref()
+    }
+
+    pub fn is_controller(&self) -> bool {
+        self.cluster_state
+            .as_ref()
+            .map(|s| s.is_controller(self.broker_id))
+            .unwrap_or(false)
+    }
+
+    fn sync_cluster_view(&mut self) {
+        if let Some(state) = &self.cluster_state {
+            self.cluster = Some(state.to_cluster_config());
+        }
+    }
+
     pub fn partition_leader(&self, topic_id: u16, partition_id: u16) -> BrokerId {
         self.cluster
             .as_ref()
@@ -183,6 +211,9 @@ impl Broker {
     }
 
     pub fn cluster_info_bytes(&self) -> Vec<u8> {
+        if let Some(state) = &self.cluster_state {
+            return state.encode_cluster_info();
+        }
         match &self.cluster {
             Some(cfg) => cfg.encode(),
             None => ClusterConfig {
