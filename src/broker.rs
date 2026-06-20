@@ -7,10 +7,12 @@
 //! Queue data and metadata are persisted under a configurable data directory.
 
 use crate::cluster::{BrokerId, ClusterConfig};
+use crate::idempotency::{IdempotencyAction, IdempotencyState};
 use crate::limits;
 use crate::log_store;
 use crate::message::{
-    self, CommitOffsetRequest, ConsumerRegister, FetchRequest, Message, ProducerRegister,
+    self, CommitOffsetRequest, ConsumerRegister, FetchRequest, IdempotentProduceRequest,
+    Message, ProducerRegister,
 };
 use crate::metadata::{load_committed_offset, load_topic_config, store_broker_topics, store_committed_offset, store_topic_config};
 use crate::metrics::BrokerMetrics;
@@ -76,6 +78,7 @@ pub struct Broker {
     metrics: Arc<BrokerMetrics>,
     broker_id: BrokerId,
     cluster: Option<ClusterConfig>,
+    idempotency: IdempotencyState,
     _temp_dir: Option<tempfile::TempDir>,
 }
 
@@ -122,10 +125,11 @@ impl Broker {
             logs: HashMap::new(),
             topic_configs,
             committed_offsets: HashMap::new(),
-            data_dir,
+            data_dir: data_dir.clone(),
             metrics: Arc::new(BrokerMetrics::new()),
             broker_id,
             cluster,
+            idempotency: IdempotencyState::load(&data_dir)?,
             _temp_dir: None,
         };
         broker.load_logs()?;
@@ -278,6 +282,29 @@ impl Broker {
         log_store::append_record(&self.data_dir, topic_id, partition_id, &record)?;
         self.persist_log_meta(topic_id, partition_id)?;
         self.metrics.record_produce(payload.len());
+        Ok(offset)
+    }
+
+    pub fn produce_idempotent(&mut self, req: &IdempotentProduceRequest) -> io::Result<u64> {
+        limits::validate_produce_payload(req.payload.len())?;
+        match self.idempotency.resolve(
+            req.topic_id,
+            req.partition_id,
+            req.producer_id,
+            req.sequence,
+        )? {
+            IdempotencyAction::ReturnOffset(offset) => return Ok(offset),
+            IdempotencyAction::Append => {}
+        }
+        let offset = self.append_log(req.topic_id, req.partition_id, &req.payload)?;
+        self.idempotency.record(
+            &self.data_dir,
+            req.topic_id,
+            req.partition_id,
+            req.producer_id,
+            req.sequence,
+            offset,
+        )?;
         Ok(offset)
     }
 

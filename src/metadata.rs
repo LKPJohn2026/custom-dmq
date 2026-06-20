@@ -27,6 +27,85 @@ pub fn offset_metadata_path(
     ))
 }
 
+pub fn idempotency_path(
+    data_dir: &Path,
+    topic_id: u16,
+    partition_id: u16,
+    producer_id: u64,
+) -> PathBuf {
+    data_dir.join(format!(
+        "idempotency_{topic_id}_{partition_id}_{producer_id}.dat"
+    ))
+}
+
+pub fn store_idempotency_state(
+    data_dir: &Path,
+    topic_id: u16,
+    partition_id: u16,
+    producer_id: u64,
+    sequence: u64,
+    offset: u64,
+) -> io::Result<()> {
+    std::fs::create_dir_all(data_dir)?;
+    let path = idempotency_path(data_dir, topic_id, partition_id, producer_id);
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)?;
+    write_u64(&mut file, 0, sequence)?;
+    write_u64(&mut file, 8, offset)
+}
+
+pub fn load_idempotency_state(
+    data_dir: &Path,
+    topic_id: u16,
+    partition_id: u16,
+    producer_id: u64,
+) -> io::Result<Option<(u64, u64)>> {
+    let path = idempotency_path(data_dir, topic_id, partition_id, producer_id);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let mut file = File::open(path)?;
+    Ok(Some((read_u64(&mut file, 0)?, read_u64(&mut file, 8)?)))
+}
+
+pub fn load_all_idempotency(
+    data_dir: &Path,
+) -> io::Result<std::collections::HashMap<(u16, u16, u64), (u64, u64)>> {
+    let mut out = std::collections::HashMap::new();
+    if !data_dir.exists() {
+        return Ok(out);
+    }
+    for entry in std::fs::read_dir(data_dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(rest) = name.strip_prefix("idempotency_").and_then(|s| s.strip_suffix(".dat"))
+        else {
+            continue;
+        };
+        let mut parts = rest.split('_');
+        let Some(topic) = parts.next().and_then(|s| s.parse().ok()) else {
+            continue;
+        };
+        let Some(partition) = parts.next().and_then(|s| s.parse().ok()) else {
+            continue;
+        };
+        let Some(producer) = parts.next().and_then(|s| s.parse().ok()) else {
+            continue;
+        };
+        if let Some(state) = load_idempotency_state(data_dir, topic, partition, producer)? {
+            out.insert((topic, partition, producer), state);
+        }
+    }
+    Ok(out)
+}
+
 pub fn topic_config_path(data_dir: &Path, topic_id: u16) -> PathBuf {
     data_dir.join(format!("topic_config_{topic_id}.dat"))
 }
@@ -249,6 +328,17 @@ mod tests {
         let dir = tempdir().unwrap();
         store_cgroup_partition_count(dir.path(), 1, 2, 3).unwrap();
         assert_eq!(load_cgroup_partition_count(dir.path(), 1, 2).unwrap(), 3);
+    }
+
+    fn idempotency_state_roundtrip() {
+        let dir = tempdir().unwrap();
+        store_idempotency_state(dir.path(), 1, 0, 99, 3, 42).unwrap();
+        assert_eq!(
+            load_idempotency_state(dir.path(), 1, 0, 99).unwrap(),
+            Some((3, 42))
+        );
+        let all = load_all_idempotency(dir.path()).unwrap();
+        assert_eq!(all.get(&(1, 0, 99)), Some(&(3, 42)));
     }
 
     #[test]

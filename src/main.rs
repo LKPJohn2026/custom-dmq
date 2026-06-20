@@ -49,8 +49,9 @@ async fn main() {
         }
         "produce" => {
             let topic_id = parse_u16(&args, 2, "topic_id");
-            let simulate = args.get(3).map(|s| s == "--simulate").unwrap_or(false);
-            producer_direct::run(topic_id, simulate).await;
+            let idempotent = args.iter().any(|s| s == "--idempotent");
+            let simulate = args.iter().any(|s| s == "--simulate");
+            producer_direct::run(topic_id, simulate, idempotent).await;
         }
         "consumer" => {
             let port = parse_u16(&args, 2, "port");
@@ -223,6 +224,68 @@ async fn handle_broker_connection(socket: TcpStream, broker: SharedBroker) {
                         },
                         Err(e) => {
                             eprintln!("[broker] produce failed: {e}");
+                            b.metrics().record_error();
+                            return;
+                        }
+                    }
+                }
+            };
+            match produce_plan {
+                ProducePlan::NotLeader(leader) => Message::RNotLeader(leader),
+                ProducePlan::Ack {
+                    offset,
+                    cluster,
+                    topic_id,
+                    partition_id,
+                    payload,
+                    local_id,
+                } => {
+                    if let Some(cluster) = cluster {
+                        let acks = custom_dmq::replication::replicate_to_followers(
+                            &cluster,
+                            local_id,
+                            topic_id,
+                            partition_id,
+                            offset,
+                            &payload,
+                        )
+                        .await
+                        .unwrap_or(0);
+                        let required = custom_dmq::replication::min_required_acks(&cluster);
+                        if custom_dmq::replication::requires_all_replicas() && acks < required {
+                            eprintln!(
+                                "[broker] insufficient replicas acked {acks}/{required} for topic {topic_id} partition {partition_id}"
+                            );
+                            {
+                                let b = broker.lock().await;
+                                b.metrics().record_error();
+                            }
+                        }
+                    }
+                    Message::RProduce(offset)
+                }
+            }
+        }
+        Message::IdempotentProduce(req) => {
+            let topic_id = req.topic_id;
+            let partition_id = req.partition_id;
+            let payload = req.payload.clone();
+            let produce_plan = {
+                let mut b = broker.lock().await;
+                if b.cluster().is_some() && !b.is_partition_leader(topic_id, partition_id) {
+                    ProducePlan::NotLeader(b.partition_leader(topic_id, partition_id))
+                } else {
+                    match b.produce_idempotent(req) {
+                        Ok(offset) => ProducePlan::Ack {
+                            offset,
+                            cluster: b.cluster().cloned(),
+                            topic_id,
+                            partition_id,
+                            payload,
+                            local_id: b.broker_id(),
+                        },
+                        Err(e) => {
+                            eprintln!("[broker] idempotent produce failed: {e}");
                             b.metrics().record_error();
                             return;
                         }

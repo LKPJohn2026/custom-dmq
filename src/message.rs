@@ -22,6 +22,7 @@ pub const LIST_TOPICS: u8 = 10;
 pub const GET_LAG: u8 = 11;
 pub const REPLICATE: u8 = 12;
 pub const GET_CLUSTER: u8 = 13;
+pub const IDEMPOTENT_PRODUCE: u8 = 14;
 
 pub const R_ECHO: u8 = 101;
 pub const R_P_REG: u8 = 102;
@@ -101,6 +102,15 @@ pub struct ReplicateRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdempotentProduceRequest {
+    pub topic_id: u16,
+    pub partition_id: u16,
+    pub producer_id: u64,
+    pub sequence: u64,
+    pub payload: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
     Echo(String),
     ProducerRegister(ProducerRegister),
@@ -115,6 +125,7 @@ pub enum Message {
     GetLag(GetLagRequest),
     Replicate(ReplicateRequest),
     GetCluster,
+    IdempotentProduce(IdempotentProduceRequest),
     REcho(String),
     RProducerRegister(u8),
     RConsumerRegister(u8),
@@ -378,6 +389,40 @@ impl ReplicateRequest {
     }
 }
 
+impl IdempotentProduceRequest {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(20 + self.payload.len());
+        out.extend_from_slice(&self.topic_id.to_be_bytes());
+        out.extend_from_slice(&self.partition_id.to_be_bytes());
+        out.extend_from_slice(&self.producer_id.to_be_bytes());
+        out.extend_from_slice(&self.sequence.to_be_bytes());
+        out.extend_from_slice(&self.payload);
+        out
+    }
+
+    pub fn decode(payload: &[u8]) -> io::Result<Self> {
+        if payload.len() < 20 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "IDEMPOTENT_PRODUCE payload too short",
+            ));
+        }
+        Ok(IdempotentProduceRequest {
+            topic_id: u16::from_be_bytes([payload[0], payload[1]]),
+            partition_id: u16::from_be_bytes([payload[2], payload[3]]),
+            producer_id: u64::from_be_bytes([
+                payload[4], payload[5], payload[6], payload[7], payload[8], payload[9],
+                payload[10], payload[11],
+            ]),
+            sequence: u64::from_be_bytes([
+                payload[12], payload[13], payload[14], payload[15], payload[16], payload[17],
+                payload[18], payload[19],
+            ]),
+            payload: payload[20..].to_vec(),
+        })
+    }
+}
+
 pub fn parse_frame(body: &[u8]) -> io::Result<Message> {
     if body.is_empty() {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "empty frame"));
@@ -404,6 +449,9 @@ pub fn parse_frame(body: &[u8]) -> io::Result<Message> {
         GET_LAG => Ok(Message::GetLag(GetLagRequest::decode(payload)?)),
         REPLICATE => Ok(Message::Replicate(ReplicateRequest::decode(payload)?)),
         GET_CLUSTER => Ok(Message::GetCluster),
+        IDEMPOTENT_PRODUCE => Ok(Message::IdempotentProduce(
+            IdempotentProduceRequest::decode(payload)?,
+        )),
         R_ECHO => Ok(Message::REcho(
             String::from_utf8_lossy(payload).into_owned(),
         )),
@@ -497,6 +545,7 @@ pub async fn write_message<W: AsyncWrite + Unpin>(
         Message::GetLag(req) => frame_bytes(GET_LAG, &req.encode()),
         Message::Replicate(req) => frame_bytes(REPLICATE, &req.encode()),
         Message::GetCluster => frame_bytes(GET_CLUSTER, &[]),
+        Message::IdempotentProduce(req) => frame_bytes(IDEMPOTENT_PRODUCE, &req.encode()),
         Message::REcho(s) => frame_bytes(R_ECHO, s.as_bytes()),
         Message::RProducerRegister(b) => frame_bytes(R_P_REG, &[*b]),
         Message::RConsumerRegister(b) => frame_bytes(R_C_REG, &[*b]),
@@ -611,6 +660,19 @@ mod tests {
             payload: b"data".to_vec(),
         };
         let decoded = ReplicateRequest::decode(&req.encode()).unwrap();
+        assert_eq!(req, decoded);
+    }
+
+    #[test]
+    fn idempotent_produce_roundtrip() {
+        let req = IdempotentProduceRequest {
+            topic_id: 1,
+            partition_id: 0,
+            producer_id: 99,
+            sequence: 3,
+            payload: b"x".to_vec(),
+        };
+        let decoded = IdempotentProduceRequest::decode(&req.encode()).unwrap();
         assert_eq!(req, decoded);
     }
 }
