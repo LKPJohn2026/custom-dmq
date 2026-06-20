@@ -1,0 +1,34 @@
+min_insync_replicas = 2
+
+[[brokers]]
+id = 1
+host = "broker-1"
+port = 7777
+
+[[brokers]]
+id = 2
+host = "broker-2"
+port = 7777
+
+[[brokers]]
+id = 3
+host = "broker-3"
+port = 7777
+
+[[assignments]]
+topic_id = 1
+partition_id = 0
+leader = 1
+replicas = [1, 2, 3]
+
+[[assignments]]
+topic_id = 1
+partition_id = 1
+leader = 2
+replicas = [2, 3, 1]
+
+[[assignments]]
+topic_id = 1
+partition_id = 2
+leader = 3
+replicas = [3, 1, 2]

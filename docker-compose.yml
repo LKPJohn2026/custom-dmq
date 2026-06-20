@@ -1,0 +1,50 @@
+services:
+  broker-1:
+    build: .
+    hostname: broker-1
+    environment:
+      DMQ_BROKER_ID: "1"
+      DMQ_BROKER_PORT: "7777"
+      DMQ_DATA_DIR: /data
+      DMQ_CLUSTER_CONFIG: /etc/dmq/cluster.toml
+      DMQ_METRICS_PORT: "9080"
+    ports:
+      - "7777:7777"
+      - "9080:9080"
+    volumes:
+      - broker-1-data:/data
+
+  broker-2:
+    build: .
+    hostname: broker-2
+    environment:
+      DMQ_BROKER_ID: "2"
+      DMQ_BROKER_PORT: "7777"
+      DMQ_DATA_DIR: /data
+      DMQ_CLUSTER_CONFIG: /etc/dmq/cluster.toml
+      DMQ_METRICS_PORT: "9080"
+    ports:
+      - "7778:7777"
+      - "9081:9080"
+    volumes:
+      - broker-2-data:/data
+
+  broker-3:
+    build: .
+    hostname: broker-3
+    environment:
+      DMQ_BROKER_ID: "3"
+      DMQ_BROKER_PORT: "7777"
+      DMQ_DATA_DIR: /data
+      DMQ_CLUSTER_CONFIG: /etc/dmq/cluster.toml
+      DMQ_METRICS_PORT: "9080"
+    ports:
+      - "7779:7777"
+      - "9082:9080"
+    volumes:
+      - broker-3-data:/data
+
+volumes:
+  broker-1-data:
+  broker-2-data:
+  broker-3-data:
