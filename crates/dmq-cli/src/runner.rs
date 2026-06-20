@@ -5,9 +5,7 @@ use crate::{
 };
 
 use custom_dmq::auth;
-use custom_dmq::broker::{
-    bind_host, broker_port, data_dir_from_env, run_consumer_ready_and_send, Broker,
-};
+use custom_dmq::broker::{data_dir_from_env, run_consumer_ready_and_send, Broker};
 use custom_dmq::client;
 use custom_dmq::compression;
 use custom_dmq::fetch_batch::encode_records;
