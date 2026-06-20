@@ -20,6 +20,8 @@ pub const CREATE_TOPIC: u8 = 8;
 pub const DESCRIBE_TOPIC: u8 = 9;
 pub const LIST_TOPICS: u8 = 10;
 pub const GET_LAG: u8 = 11;
+pub const REPLICATE: u8 = 12;
+pub const GET_CLUSTER: u8 = 13;
 
 pub const R_ECHO: u8 = 101;
 pub const R_P_REG: u8 = 102;
@@ -32,6 +34,9 @@ pub const R_CREATE_TOPIC: u8 = 108;
 pub const R_DESCRIBE_TOPIC: u8 = 109;
 pub const R_LIST_TOPICS: u8 = 110;
 pub const R_GET_LAG: u8 = 111;
+pub const R_REPLICATE: u8 = 112;
+pub const R_GET_CLUSTER: u8 = 113;
+pub const R_NOT_LEADER: u8 = 114;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProducerRegister {
@@ -88,6 +93,14 @@ pub struct GetLagRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplicateRequest {
+    pub topic_id: u16,
+    pub partition_id: u16,
+    pub offset: u64,
+    pub payload: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
     Echo(String),
     ProducerRegister(ProducerRegister),
@@ -100,6 +113,8 @@ pub enum Message {
     DescribeTopic(DescribeTopicRequest),
     ListTopics,
     GetLag(GetLagRequest),
+    Replicate(ReplicateRequest),
+    GetCluster,
     REcho(String),
     RProducerRegister(u8),
     RConsumerRegister(u8),
@@ -111,6 +126,9 @@ pub enum Message {
     RDescribeTopic(Vec<u8>),
     RListTopics(Vec<u8>),
     RGetLag(Vec<u8>),
+    RReplicate(u8),
+    RGetCluster(Vec<u8>),
+    RNotLeader(u16),
 }
 
 impl ProducerRegister {
@@ -322,6 +340,44 @@ impl GetLagRequest {
     }
 }
 
+impl ReplicateRequest {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(14 + self.payload.len());
+        out.extend_from_slice(&self.topic_id.to_be_bytes());
+        out.extend_from_slice(&self.partition_id.to_be_bytes());
+        out.extend_from_slice(&self.offset.to_be_bytes());
+        let len = u16::try_from(self.payload.len()).expect("payload fits u16");
+        out.extend_from_slice(&len.to_be_bytes());
+        out.extend_from_slice(&self.payload);
+        out
+    }
+
+    pub fn decode(payload: &[u8]) -> io::Result<Self> {
+        if payload.len() < 14 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "REPLICATE payload too short",
+            ));
+        }
+        let len = u16::from_be_bytes([payload[12], payload[13]]) as usize;
+        if payload.len() < 14 + len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "REPLICATE payload truncated",
+            ));
+        }
+        Ok(ReplicateRequest {
+            topic_id: u16::from_be_bytes([payload[0], payload[1]]),
+            partition_id: u16::from_be_bytes([payload[2], payload[3]]),
+            offset: u64::from_be_bytes([
+                payload[4], payload[5], payload[6], payload[7], payload[8], payload[9],
+                payload[10], payload[11],
+            ]),
+            payload: payload[14..14 + len].to_vec(),
+        })
+    }
+}
+
 pub fn parse_frame(body: &[u8]) -> io::Result<Message> {
     if body.is_empty() {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "empty frame"));
@@ -346,6 +402,8 @@ pub fn parse_frame(body: &[u8]) -> io::Result<Message> {
         )?)),
         LIST_TOPICS => Ok(Message::ListTopics),
         GET_LAG => Ok(Message::GetLag(GetLagRequest::decode(payload)?)),
+        REPLICATE => Ok(Message::Replicate(ReplicateRequest::decode(payload)?)),
+        GET_CLUSTER => Ok(Message::GetCluster),
         R_ECHO => Ok(Message::REcho(
             String::from_utf8_lossy(payload).into_owned(),
         )),
@@ -385,6 +443,20 @@ pub fn parse_frame(body: &[u8]) -> io::Result<Message> {
         R_DESCRIBE_TOPIC => Ok(Message::RDescribeTopic(payload.to_vec())),
         R_LIST_TOPICS => Ok(Message::RListTopics(payload.to_vec())),
         R_GET_LAG => Ok(Message::RGetLag(payload.to_vec())),
+        R_REPLICATE => {
+            let byte = payload.first().copied().unwrap_or(0);
+            Ok(Message::RReplicate(byte))
+        }
+        R_GET_CLUSTER => Ok(Message::RGetCluster(payload.to_vec())),
+        R_NOT_LEADER => {
+            if payload.len() < 2 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "R_NOT_LEADER payload too short",
+                ));
+            }
+            Ok(Message::RNotLeader(u16::from_be_bytes([payload[0], payload[1]])))
+        }
         other => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("unknown message type {other}"),
@@ -423,6 +495,8 @@ pub async fn write_message<W: AsyncWrite + Unpin>(
         Message::DescribeTopic(req) => frame_bytes(DESCRIBE_TOPIC, &req.encode()),
         Message::ListTopics => frame_bytes(LIST_TOPICS, &[]),
         Message::GetLag(req) => frame_bytes(GET_LAG, &req.encode()),
+        Message::Replicate(req) => frame_bytes(REPLICATE, &req.encode()),
+        Message::GetCluster => frame_bytes(GET_CLUSTER, &[]),
         Message::REcho(s) => frame_bytes(R_ECHO, s.as_bytes()),
         Message::RProducerRegister(b) => frame_bytes(R_P_REG, &[*b]),
         Message::RConsumerRegister(b) => frame_bytes(R_C_REG, &[*b]),
@@ -434,6 +508,9 @@ pub async fn write_message<W: AsyncWrite + Unpin>(
         Message::RDescribeTopic(bytes) => frame_bytes(R_DESCRIBE_TOPIC, bytes),
         Message::RListTopics(bytes) => frame_bytes(R_LIST_TOPICS, bytes),
         Message::RGetLag(bytes) => frame_bytes(R_GET_LAG, bytes),
+        Message::RReplicate(b) => frame_bytes(R_REPLICATE, &[*b]),
+        Message::RGetCluster(bytes) => frame_bytes(R_GET_CLUSTER, bytes),
+        Message::RNotLeader(id) => frame_bytes(R_NOT_LEADER, &id.to_be_bytes()),
     };
     writer.write_all(&frame).await?;
     writer.flush().await
@@ -522,6 +599,18 @@ mod tests {
             max_records: 100,
         };
         let decoded = CreateTopicRequest::decode(&req.encode()).unwrap();
+        assert_eq!(req, decoded);
+    }
+
+    #[test]
+    fn replicate_request_roundtrip() {
+        let req = ReplicateRequest {
+            topic_id: 1,
+            partition_id: 0,
+            offset: 42,
+            payload: b"data".to_vec(),
+        };
+        let decoded = ReplicateRequest::decode(&req.encode()).unwrap();
         assert_eq!(req, decoded);
     }
 }
