@@ -1,20 +1,32 @@
-[package]
-name = "custom-dmq"
-version = "0.1.0"
+[workspace]
+members = [
+    "crates/dmq-protocol",
+    "crates/dmq-storage",
+    "crates/dmq-core",
+    "crates/dmq-broker",
+    "crates/dmq-cli",
+    ".",
+]
+resolver = "2"
+
+[workspace.package]
+version = "2.0.0"
 edition = "2021"
 
-[dependencies]
+[workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
-memmap2 = "0.9"
-tempfile = "3"
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
-lz4_flex = "0.11"
-rustls = "0.23"
-rustls-pemfile = "2"
-rustls-pki-types = "1"
-tokio-rustls = "0.26"
+tempfile = "3"
+serial_test = "3"
+
+[package]
+name = "custom-dmq-integration"
+version.workspace = true
+edition.workspace = true
+publish = false
 
 [dev-dependencies]
-tokio = { version = "1", features = ["full", "test-util"] }
-serial_test = "3"
+custom_dmq = { package = "dmq-broker", path = "crates/dmq-broker" }
+tokio = { workspace = true, features = ["full", "test-util"] }
+tempfile = { workspace = true }
+serial_test = { workspace = true }

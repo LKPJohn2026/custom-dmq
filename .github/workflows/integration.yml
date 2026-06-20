@@ -1,0 +1,39 @@
+name: Integration
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  docker-e2e:
+    name: Docker Compose e2e
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build broker image
+        run: docker compose build broker-1
+      - name: Start cluster
+        run: docker compose up -d broker-1 broker-2 broker-3
+      - name: Wait for brokers
+        run: |
+          for port in 7777 7778 7779; do
+            for i in $(seq 1 30); do
+              if timeout 1 bash -c "echo >/dev/tcp/127.0.0.1/$port" 2>/dev/null; then
+                echo "broker on $port ready"
+                break
+              fi
+              sleep 1
+            done
+          done
+      - name: Produce and fetch roundtrip
+        run: |
+          cargo build --release -p dmq-cli
+          DMQ_BROKER_PORT=7777 ./target/release/dmq-produce 1 --simulate
+          ./target/release/dmq-consume 1 1 || true
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

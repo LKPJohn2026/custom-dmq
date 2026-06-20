@@ -10,7 +10,7 @@
 //!
 //! Offsets are included so consumers can commit the next offset precisely.
 
-use crate::partition_log::Record;
+use dmq_storage::partition_log::Record;
 use std::io;
 
 pub fn encode_records(records: &[Record]) -> Vec<u8> {

@@ -1,8 +1,8 @@
 //! Leader-to-follower record replication over TCP.
 
 use crate::broker::broker_id;
-use crate::cluster::{BrokerId, ClusterConfig};
-use crate::message::{self, Message, ReplicateRequest};
+use dmq_core::cluster::{BrokerId, ClusterConfig};
+use dmq_protocol::message::{self, Message, ReplicateRequest};
 use std::io;
 use tokio::io::BufReader;
 use tokio::net::TcpStream;
@@ -95,7 +95,7 @@ pub fn local_broker_id() -> BrokerId {
 #[cfg(test)]
 mod tests {
     use crate::broker::Broker;
-    use crate::topic_config::TopicConfig;
+    use dmq_storage::topic_config::TopicConfig;
 
     #[test]
     fn apply_replica_is_idempotent() {
@@ -104,7 +104,7 @@ mod tests {
         broker.apply_replica(1, 0, 0, b"a").unwrap();
         broker.apply_replica(1, 0, 0, b"a").unwrap();
         let records = broker
-            .fetch_log(&crate::message::FetchRequest {
+            .fetch_log(&dmq_protocol::message::FetchRequest {
                 topic_id: 1,
                 partition_id: 0,
                 offset: 0,

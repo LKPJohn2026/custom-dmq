@@ -1,8 +1,8 @@
 //! Client connection helpers: optional TLS, protocol handshake, v2 frames.
 
-use crate::auth;
-use crate::message::{HandshakeRequest, Message};
-use crate::protocol::{self, Frame, WireFormat};
+use dmq_core::auth;
+use dmq_protocol::message::{HandshakeRequest, Message};
+use dmq_protocol::protocol::{self, Frame, WireFormat};
 use std::io;
 use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream;

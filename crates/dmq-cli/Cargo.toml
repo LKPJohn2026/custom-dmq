@@ -1,0 +1,28 @@
+[package]
+name = "dmq-cli"
+version = "2.0.0"
+edition = "2021"
+
+[[bin]]
+name = "custom-dmq"
+path = "src/bin/custom-dmq.rs"
+
+[[bin]]
+name = "dmq-broker"
+path = "src/bin/dmq-broker.rs"
+
+[[bin]]
+name = "dmq-produce"
+path = "src/bin/dmq-produce.rs"
+
+[[bin]]
+name = "dmq-consume"
+path = "src/bin/dmq-consume.rs"
+
+[[bin]]
+name = "dmq-admin"
+path = "src/bin/dmq-admin.rs"
+
+[dependencies]
+custom_dmq = { package = "dmq-broker", path = "../dmq-broker" }
+tokio = { version = "1", features = ["full"] }

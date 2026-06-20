@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-headless
+spec:
+  clusterIP: None
+  selector:
+    app: {{ .Release.Name }}
+  ports:
+    - port: {{ .Values.broker.port }}
+      name: broker
+    - port: {{ .Values.broker.metricsPort }}
+      name: metrics

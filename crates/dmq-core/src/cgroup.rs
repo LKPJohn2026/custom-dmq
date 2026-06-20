@@ -1,7 +1,7 @@
 //! Consumer group with partition queues.
 
-use crate::metadata::store_cgroup_partition_count;
 use crate::partition::Partition;
+use dmq_storage::metadata::store_cgroup_partition_count;
 use std::io;
 use std::path::Path;
 
@@ -13,7 +13,8 @@ pub struct ConsumerGroup {
 
 impl ConsumerGroup {
     pub fn load(data_dir: &Path, topic_id: u16, group_id: u16) -> io::Result<Self> {
-        let count = crate::metadata::load_cgroup_partition_count(data_dir, topic_id, group_id)?;
+        let count =
+            dmq_storage::metadata::load_cgroup_partition_count(data_dir, topic_id, group_id)?;
         let partition_count = count.max(1);
         let mut partitions = Vec::with_capacity(partition_count as usize);
         for i in 0..partition_count {

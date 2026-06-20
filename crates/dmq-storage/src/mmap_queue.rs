@@ -1,6 +1,6 @@
 //! Memory-mapped ring queues backed by on-disk arrays and metadata.
 
-use crate::topic::{MAX_MSG_SIZE, QUEUE_CAPACITY};
+use crate::constants::{MAX_MSG_SIZE, QUEUE_CAPACITY};
 use memmap2::{MmapMut, MmapOptions};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, Write};

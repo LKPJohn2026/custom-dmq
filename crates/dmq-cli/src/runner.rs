@@ -1,12 +1,8 @@
 //! CLI entry point: `server`, `producer`, and `consumer` subcommands.
 
-mod admin;
-mod consumer_client;
-mod consumer_fetch;
-mod metrics_server;
-mod producer;
-mod producer_direct;
-mod request_log;
+use crate::{
+    admin, consumer_client, consumer_fetch, metrics_server, producer, producer_direct, request_log,
+};
 
 use custom_dmq::auth;
 use custom_dmq::broker::{broker_port, data_dir_from_env, run_consumer_ready_and_send, Broker};
@@ -55,9 +51,7 @@ enum ProducePlan {
     },
 }
 
-#[tokio::main]
-async fn main() {
-    let args: Vec<String> = std::env::args().collect();
+pub async fn run(args: Vec<String>) {
     if args.len() < 2 {
         print_usage();
         std::process::exit(1);

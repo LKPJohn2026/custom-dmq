@@ -135,6 +135,7 @@ impl PartitionLog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn append_returns_monotonic_offsets() {
@@ -195,5 +196,20 @@ mod tests {
         let r = log.fetch(0, 1024);
         assert_eq!(r.records[0].offset, 1);
         assert_eq!(r.records[0].payload, b"1".to_vec());
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn append_offsets_are_monotonic(payloads in proptest::collection::vec(proptest::collection::vec(any::<u8>(), 0..32), 1..50)) {
+            let mut log = PartitionLog::new();
+            let mut expected = 0u64;
+            for p in &payloads {
+                let off = log.append(p);
+                prop_assert_eq!(off, expected);
+                expected += 1;
+            }
+            prop_assert_eq!(log.next_offset(), expected);
+            prop_assert!(log.base_offset() <= log.next_offset());
+        }
     }
 }

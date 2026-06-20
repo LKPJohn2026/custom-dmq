@@ -6,26 +6,26 @@
 //! readiness with R_PCM and receive the next message from their assigned partition.
 //! Queue data and metadata are persisted under a configurable data directory.
 
-use crate::acl::{Acl, Operation};
-use crate::cluster::{BrokerId, ClusterConfig};
-use crate::cluster_state::{self, ClusterState};
 use crate::coordinator::{self, GroupState};
-use crate::idempotency::{IdempotencyAction, IdempotencyState};
-use crate::limits;
-use crate::log_store;
-use crate::message::{
+use dmq_core::acl::{Acl, Operation};
+use dmq_core::cluster::{BrokerId, ClusterConfig};
+use dmq_core::cluster_state::{self, ClusterState};
+use dmq_core::limits;
+use dmq_core::metrics::BrokerMetrics;
+use dmq_core::topic::Topic;
+use dmq_protocol::message::{
     self, BrokerHeartbeatRequest, CommitOffsetRequest, ConsumerRegister, FetchRequest,
     GroupHeartbeatRequest, IdempotentProduceRequest, JoinGroupRequest, Message, ProducerRegister,
 };
-use crate::metadata::{
+use dmq_storage::idempotency::{IdempotencyAction, IdempotencyState};
+use dmq_storage::log_store;
+use dmq_storage::metadata::{
     load_committed_offset, load_topic_config, store_broker_topics, store_committed_offset,
     store_topic_config,
 };
-use crate::metrics::BrokerMetrics;
-use crate::partition_log::{PartitionLog, Record};
-use crate::storage::{GroupId, PartitionIdx, Storage, TopicId};
-use crate::topic::Topic;
-use crate::topic_config::TopicConfig;
+use dmq_storage::partition_log::{PartitionLog, Record};
+use dmq_storage::storage::{GroupId, PartitionIdx, Storage, TopicId};
+use dmq_storage::topic_config::TopicConfig;
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -117,7 +117,7 @@ impl Broker {
     ) -> io::Result<Self> {
         let data_dir = data_dir.as_ref().to_path_buf();
         std::fs::create_dir_all(&data_dir)?;
-        let topic_ids = crate::metadata::load_broker_topics(&data_dir)?;
+        let topic_ids = dmq_storage::metadata::load_broker_topics(&data_dir)?;
         let mut topics = HashMap::new();
         let mut topic_configs = HashMap::new();
         for &topic_id in &topic_ids {
@@ -366,7 +366,7 @@ impl Broker {
             Some(cfg) => cfg.encode(),
             None => ClusterConfig {
                 min_insync_replicas: 1,
-                brokers: vec![crate::cluster::BrokerNode {
+                brokers: vec![dmq_core::cluster::BrokerNode {
                     id: self.broker_id,
                     host: "127.0.0.1".into(),
                     port: broker_port(),
@@ -891,8 +891,8 @@ pub async fn run_consumer_ready_and_send<R, W>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::{ConsumerRegister, ProducerRegister};
-    use crate::topic_config::TopicConfig;
+    use dmq_protocol::message::{ConsumerRegister, ProducerRegister};
+    use dmq_storage::topic_config::TopicConfig;
 
     fn setup() -> Broker {
         let mut broker = Broker::new();

@@ -1,14 +1,12 @@
 //! Topic staging queue and consumer groups.
 
 use crate::cgroup::ConsumerGroup;
-use crate::metadata::store_topic_groups;
-use crate::mmap_queue::{MmapQueue, STAGING_GROUP_ID, STAGING_PARTITION_ID};
 use crate::partition::Partition;
+use dmq_storage::constants::{MAX_MSG_SIZE, QUEUE_CAPACITY};
+use dmq_storage::metadata::store_topic_groups;
+use dmq_storage::mmap_queue::{MmapQueue, STAGING_GROUP_ID, STAGING_PARTITION_ID};
 use std::io;
 use std::path::{Path, PathBuf};
-
-pub const MAX_MSG_SIZE: usize = 255;
-pub const QUEUE_CAPACITY: usize = 10_000;
 
 /// In-memory ring buffer used by unit tests for offset semantics.
 pub struct Queue {
@@ -101,7 +99,7 @@ pub struct Topic {
 impl Topic {
     pub fn load(data_dir: &Path, topic_id: u16) -> io::Result<Self> {
         let staging = MmapQueue::open(data_dir, topic_id, STAGING_GROUP_ID, STAGING_PARTITION_ID)?;
-        let group_ids = crate::metadata::load_topic_groups(data_dir, topic_id)?;
+        let group_ids = dmq_storage::metadata::load_topic_groups(data_dir, topic_id)?;
         let mut cgroups = Vec::with_capacity(group_ids.len());
         for group_id in group_ids {
             cgroups.push(ConsumerGroup::load(data_dir, topic_id, group_id)?);

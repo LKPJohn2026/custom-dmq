@@ -1,0 +1,23 @@
+[package]
+name = "dmq-broker"
+version = "2.0.0"
+edition = "2021"
+
+[lib]
+name = "custom_dmq"
+path = "src/lib.rs"
+
+[dependencies]
+dmq-core = { path = "../dmq-core" }
+dmq-protocol = { path = "../dmq-protocol" }
+dmq-storage = { path = "../dmq-storage" }
+tokio = { version = "1", features = ["full"] }
+rustls = "0.23"
+rustls-pemfile = "2"
+rustls-pki-types = "1"
+tokio-rustls = "0.26"
+tempfile = "3"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+tempfile = "3"

@@ -1,6 +1,6 @@
 //! Per-group partition with a memory-mapped message queue.
 
-use crate::mmap_queue::MmapQueue;
+use dmq_storage::mmap_queue::MmapQueue;
 use std::io;
 use std::path::Path;
 

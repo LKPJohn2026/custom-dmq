@@ -44,6 +44,26 @@ services:
     volumes:
       - broker-3-data:/data
 
+  demo-produce:
+    build: .
+    depends_on:
+      - broker-1
+    environment:
+      DMQ_BROKER_PORT: "7777"
+    entrypoint: ["dmq-produce"]
+    command: ["1", "--simulate"]
+    profiles: ["demo"]
+
+  demo-consume:
+    build: .
+    depends_on:
+      - broker-1
+    environment:
+      DMQ_BROKER_PORT: "7777"
+    entrypoint: ["dmq-consume"]
+    command: ["1", "1"]
+    profiles: ["demo"]
+
 volumes:
   broker-1-data:
   broker-2-data:

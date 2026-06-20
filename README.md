@@ -53,6 +53,7 @@ Design notes: [`docs/architecture.md`](docs/architecture.md).
 | **Production polish (Phase 4)** | Configurable fsync, idempotent produce, health/readiness probes, Docker Compose, and Kubernetes manifests. |
 | **Dynamic cluster (Phase 5)** | Embedded controller on broker 1, `BROKER_HEARTBEAT` liveness, automatic leader failover with epochs, unified log-only produce in cluster mode, `JOIN_GROUP` / `GROUP_HEARTBEAT` coordinator with range assignment. |
 | **Protocol hardening (Phase 6)** | v2 frames with correlation ids, handshake + auth, optional TLS, ACLs, lz4 fetch compression, fetch long-polling, latency histograms. Dial-back disabled by default. |
+| **Engineering maturity (Phase 7 / v2.0.0)** | Cargo workspace (`dmq-protocol`, `dmq-storage`, `dmq-core`, `dmq-broker`, `dmq-cli`), standalone binaries, full CI/CD, ADRs, runbook, Helm chart, Grafana dashboard. |
 
 ### Consistency model
 
@@ -68,9 +69,10 @@ This system is **eventually consistent** with respect to consumers:
 
 | Layer | Choice |
 |------|--------|
-| Runtime | Rust 2021 + Tokio |
-| Persistence | `memmap2` + small metadata files |
-| CI | GitHub Actions: fmt → clippy → test → release build |
+| Runtime | Rust 2021 + Tokio (workspace crates) |
+| Persistence | Append-only partition logs + mmap legacy queues |
+| CI | GitHub Actions: fmt → clippy → test → audit → deny → release build |
+| Deploy | Docker Compose, Kubernetes, Helm (`deploy/helm/custom-dmq/`) |
 
 ---
 
@@ -85,7 +87,8 @@ This system is **eventually consistent** with respect to consumers:
 ### Start the broker
 
 ```bash
-cargo run -- server
+cargo run -p dmq-cli --bin dmq-broker
+# or: cargo run -p dmq-cli --bin custom-dmq -- server
 ```
 
 ### Start a consumer (group 1, topic 1)
@@ -103,8 +106,14 @@ cargo run -- producer 7778 1 --simulate
 ### Or use the pull-based path (no dial-back)
 
 ```bash
-cargo run -- produce 1 --simulate
-cargo run -- fetch 1 1
+cargo run -p dmq-cli --bin dmq-produce -- 1 --simulate
+cargo run -p dmq-cli --bin dmq-consume -- 1 1
+```
+
+### One-command Docker demo
+
+```bash
+docker compose --profile demo up
 ```
 
 ### Multi-broker cluster (3 brokers, RF=3)
