@@ -18,6 +18,7 @@ fn produce_survives_broker_restart() {
         partition_id: 0,
         offset: 0,
         max_bytes: 4096,
+        max_wait_ms: 0,
     })
     .unwrap();
     assert_eq!(records.len(), 2);

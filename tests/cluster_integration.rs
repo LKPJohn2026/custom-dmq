@@ -84,6 +84,7 @@ async fn replicate_frame_applies_on_follower_broker() {
             partition_id: 0,
             offset: 0,
             max_bytes: 1024,
+            max_wait_ms: 0,
         })
         .unwrap()
     };

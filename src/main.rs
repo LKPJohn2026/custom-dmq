@@ -8,17 +8,40 @@ mod producer;
 mod producer_direct;
 mod request_log;
 
+use custom_dmq::auth;
 use custom_dmq::broker::{broker_port, data_dir_from_env, run_consumer_ready_and_send, Broker};
+use custom_dmq::client;
+use custom_dmq::compression;
 use custom_dmq::fetch_batch::encode_records;
 use custom_dmq::message::Message;
+use custom_dmq::protocol::{self, Frame, WireFormat};
 use custom_dmq::topic_config::TopicConfig;
 use std::sync::Arc;
-use tokio::io::BufReader;
+use std::time::Instant;
+use tokio::io::{AsyncRead, AsyncWrite, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
 
 type SharedBroker = Arc<Mutex<Broker>>;
+
+struct ConnectionSession {
+    wire_format: WireFormat,
+    protocol_version: u16,
+    principal: String,
+    handshaken: bool,
+}
+
+impl Default for ConnectionSession {
+    fn default() -> Self {
+        Self {
+            wire_format: WireFormat::V1,
+            protocol_version: protocol::PROTOCOL_V1,
+            principal: "anonymous".to_string(),
+            handshaken: false,
+        }
+    }
+}
 
 enum ProducePlan {
     NotLeader(u16),
@@ -102,7 +125,11 @@ fn parse_u16(args: &[String], idx: usize, name: &str) -> u16 {
 async fn run_server() {
     let addr = format!("127.0.0.1:{}", broker_port());
     let listener = TcpListener::bind(&addr).await.unwrap();
-    println!("[broker] Listening on {addr}");
+    if custom_dmq::tls::tls_enabled() {
+        println!("[broker] Listening on {addr} (TLS enabled)");
+    } else {
+        println!("[broker] Listening on {addr}");
+    }
 
     let data_dir = data_dir_from_env();
     let broker: SharedBroker = Arc::new(Mutex::new(
@@ -127,48 +154,126 @@ async fn run_server() {
             Ok((socket, peer)) => {
                 println!("[broker] Connection from {peer}");
                 let broker = Arc::clone(&broker);
-                tokio::spawn(handle_broker_connection(socket, broker, peer.to_string()));
+                if custom_dmq::tls::tls_enabled() {
+                    tokio::spawn(async move {
+                        match custom_dmq::tls::accept(socket).await {
+                            Ok(tls) => handle_broker_connection(tls, broker, peer.to_string()).await,
+                            Err(e) => eprintln!("[broker] TLS accept failed: {e}"),
+                        }
+                    });
+                } else {
+                    tokio::spawn(handle_broker_connection(socket, broker, peer.to_string()));
+                }
             }
             Err(e) => eprintln!("[broker] Accept error: {e}"),
         }
     }
 }
 
-async fn handle_broker_connection(socket: TcpStream, broker: SharedBroker, peer: String) {
-    let (reader, mut writer) = socket.into_split();
-    let mut buf = BufReader::new(reader);
+async fn handle_broker_connection<S>(mut socket: S, broker: SharedBroker, peer: String)
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let mut session = ConnectionSession::default();
 
-    let message = match custom_dmq::message::read_message(&mut buf).await {
-        Ok(m) => m,
-        Err(e) => {
-            request_log::log_request_error("READ", &peer, &e.to_string());
+    loop {
+        let started = Instant::now();
+        let (frame, wire_format) = match protocol::read_frame(&mut socket).await {
+            Ok(v) => v,
+            Err(e) => {
+                request_log::log_request_error("READ", &peer, &e.to_string());
+                return;
+            }
+        };
+        session.wire_format = wire_format;
+        request_log::log_request(request_log::request_name(&frame.message), &peer);
+
+        let response = match dispatch_message(&broker, &frame, &mut session, &peer).await {
+            Some(msg) => Frame {
+                correlation_id: frame.correlation_id,
+                message: msg,
+            },
+            None => return,
+        };
+
+        if protocol::write_frame(&mut socket, &response, session.wire_format)
+            .await
+            .is_err()
+        {
+            eprintln!("[broker] Failed to write response");
             return;
         }
-    };
-    request_log::log_request(request_log::request_name(&message), &peer);
 
-    let response = match &message {
+        {
+            let b = broker.lock().await;
+            b.metrics().record_request_latency(started.elapsed().as_millis() as u64);
+        }
+
+        if matches!(frame.message, Message::Handshake(_)) {
+            continue;
+        }
+        if session.wire_format == WireFormat::V2 && session.protocol_version >= protocol::PROTOCOL_V2
+        {
+            continue;
+        }
+        break;
+    }
+}
+
+async fn dispatch_message(
+    broker: &SharedBroker,
+    frame: &Frame,
+    session: &mut ConnectionSession,
+    peer: &str,
+) -> Option<Message> {
+    match &frame.message {
+        Message::Handshake(req) => {
+            match client::process_handshake(req) {
+                Ok(version) => {
+                    session.handshaken = true;
+                    session.protocol_version = version;
+                    session.principal = auth::principal_from_token(&req.auth_token);
+                    Some(Message::RHandshake(0, version))
+                }
+                Err((code, msg)) => Some(Message::RError(code, msg)),
+            }
+        }
         Message::Echo(text) => {
+            if protocol::require_handshake() && !session.handshaken {
+                return Some(Message::RError(1, "handshake required".into()));
+            }
             let reply = {
                 let b = broker.lock().await;
                 b.process_echo(text)
             };
-            Message::REcho(reply)
+            Some(Message::REcho(reply))
         }
         Message::ProducerRegister(reg) => {
+            if !protocol::legacy_dialback_enabled() {
+                return Some(Message::RError(
+                    1,
+                    "dial-back disabled; use produce command".into(),
+                ));
+            }
             let topic_id = reg.topic_id;
             let port = reg.port;
             {
                 let mut b = broker.lock().await;
                 if b.register_producer(reg).is_err() {
                     eprintln!("[broker] Failed to register producer");
-                    return;
+                    return None;
                 }
             }
-            tokio::spawn(dial_back_to_producer(port, topic_id, Arc::clone(&broker)));
-            Message::RProducerRegister(0)
+            tokio::spawn(dial_back_to_producer(port, topic_id, Arc::clone(broker)));
+            Some(Message::RProducerRegister(0))
         }
         Message::ConsumerRegister(reg) => {
+            if !protocol::legacy_dialback_enabled() {
+                return Some(Message::RError(
+                    1,
+                    "dial-back disabled; use fetch command".into(),
+                ));
+            }
             let topic_id = reg.topic_id;
             let group_id = reg.group_id;
             let port = reg.port;
@@ -178,7 +283,7 @@ async fn handle_broker_connection(socket: TcpStream, broker: SharedBroker, peer:
                     Ok(idx) => idx,
                     Err(e) => {
                         eprintln!("[broker] Failed to register consumer: {e}");
-                        return;
+                        return None;
                     }
                 }
             };
@@ -187,34 +292,80 @@ async fn handle_broker_connection(socket: TcpStream, broker: SharedBroker, peer:
                 topic_id,
                 group_id,
                 partition_idx,
-                Arc::clone(&broker),
+                Arc::clone(broker),
             ));
-            Message::RConsumerRegister(0)
+            Some(Message::RConsumerRegister(0))
         }
         Message::Fetch(req) => {
-            let records = {
-                let mut b = broker.lock().await;
-                match b.fetch_log(req) {
-                    Ok(records) => records,
-                    Err(e) => {
-                        eprintln!("[broker] fetch failed: {e}");
-                        b.metrics().record_error();
-                        return;
-                    }
+            if protocol::require_handshake() && !session.handshaken {
+                return Some(Message::RError(1, "handshake required".into()));
+            }
+            {
+                let b = broker.lock().await;
+                if let Err(e) = b.check_fetch_acl(&session.principal, req.topic_id) {
+                    eprintln!("[broker] fetch acl denied for {peer}: {e}");
+                    b.metrics().record_error();
+                    return Some(Message::RError(3, "acl denied".into()));
                 }
+                if let Some(leader) = b.fetch_redirect_leader(req.topic_id, req.partition_id) {
+                    return Some(Message::RNotLeader(leader));
+                }
+            }
+            let deadline = if req.max_wait_ms > 0 {
+                Some(Instant::now() + Duration::from_millis(req.max_wait_ms as u64))
+            } else {
+                None
             };
-            Message::RFetch(encode_records(&records))
+            let records = loop {
+                let records = {
+                    let mut b = broker.lock().await;
+                    match b.fetch_log(req) {
+                        Ok(records) => records,
+                        Err(e) => {
+                            eprintln!("[broker] fetch failed: {e}");
+                            b.metrics().record_error();
+                            return None;
+                        }
+                    }
+                };
+                if !records.is_empty()
+                    || deadline.is_none()
+                    || Instant::now() >= deadline.unwrap()
+                {
+                    break records;
+                }
+                sleep(Duration::from_millis(50)).await;
+            };
+            let batch = encode_records(&records);
+            match compression::wrap_batch(compression::preferred_codec(), &batch) {
+                Ok(payload) => Some(Message::RFetch(payload)),
+                Err(e) => {
+                    eprintln!("[broker] fetch compress failed: {e}");
+                    Some(Message::RFetch(batch))
+                }
+            }
         }
         Message::CommitOffset(req) => {
             {
                 let mut b = broker.lock().await;
                 if b.commit_offset(req).is_err() {
-                    return;
+                    return None;
                 }
             }
-            Message::RCommitOffset(0)
+            Some(Message::RCommitOffset(0))
         }
         Message::Produce(req) => {
+            if protocol::require_handshake() && !session.handshaken {
+                return Some(Message::RError(1, "handshake required".into()));
+            }
+            {
+                let b = broker.lock().await;
+                if let Err(e) = b.check_produce_acl(&session.principal, req.topic_id) {
+                    eprintln!("[broker] produce acl denied for {peer}: {e}");
+                    b.metrics().record_error();
+                    return Some(Message::RError(3, "acl denied".into()));
+                }
+            }
             let topic_id = req.topic_id;
             let partition_id = req.partition_id;
             let payload = req.payload.clone();
@@ -235,12 +386,12 @@ async fn handle_broker_connection(socket: TcpStream, broker: SharedBroker, peer:
                         Err(e) => {
                             eprintln!("[broker] produce failed: {e}");
                             b.metrics().record_error();
-                            return;
+                            return None;
                         }
                     }
                 }
             };
-            match produce_plan {
+            Some(match produce_plan {
                 ProducePlan::NotLeader(leader) => Message::RNotLeader(leader),
                 ProducePlan::Ack {
                     offset,
@@ -266,17 +417,26 @@ async fn handle_broker_connection(socket: TcpStream, broker: SharedBroker, peer:
                             eprintln!(
                                 "[broker] insufficient replicas acked {acks}/{required} for topic {topic_id} partition {partition_id}"
                             );
-                            {
-                                let b = broker.lock().await;
-                                b.metrics().record_error();
-                            }
+                            let b = broker.lock().await;
+                            b.metrics().record_error();
                         }
                     }
                     Message::RProduce(offset)
                 }
-            }
+            })
         }
         Message::IdempotentProduce(req) => {
+            if protocol::require_handshake() && !session.handshaken {
+                return Some(Message::RError(1, "handshake required".into()));
+            }
+            {
+                let b = broker.lock().await;
+                if let Err(e) = b.check_produce_acl(&session.principal, req.topic_id) {
+                    eprintln!("[broker] produce acl denied for {peer}: {e}");
+                    b.metrics().record_error();
+                    return Some(Message::RError(3, "acl denied".into()));
+                }
+            }
             let topic_id = req.topic_id;
             let partition_id = req.partition_id;
             let payload = req.payload.clone();
@@ -297,12 +457,12 @@ async fn handle_broker_connection(socket: TcpStream, broker: SharedBroker, peer:
                         Err(e) => {
                             eprintln!("[broker] idempotent produce failed: {e}");
                             b.metrics().record_error();
-                            return;
+                            return None;
                         }
                     }
                 }
             };
-            match produce_plan {
+            Some(match produce_plan {
                 ProducePlan::NotLeader(leader) => Message::RNotLeader(leader),
                 ProducePlan::Ack {
                     offset,
@@ -328,17 +488,23 @@ async fn handle_broker_connection(socket: TcpStream, broker: SharedBroker, peer:
                             eprintln!(
                                 "[broker] insufficient replicas acked {acks}/{required} for topic {topic_id} partition {partition_id}"
                             );
-                            {
-                                let b = broker.lock().await;
-                                b.metrics().record_error();
-                            }
+                            let b = broker.lock().await;
+                            b.metrics().record_error();
                         }
                     }
                     Message::RProduce(offset)
                 }
-            }
+            })
         }
         Message::CreateTopic(req) => {
+            {
+                let b = broker.lock().await;
+                if let Err(e) = b.check_admin_acl(&session.principal, req.topic_id) {
+                    eprintln!("[broker] admin acl denied for {peer}: {e}");
+                    b.metrics().record_error();
+                    return Some(Message::RError(3, "acl denied".into()));
+                }
+            }
             let code = {
                 let mut b = broker.lock().await;
                 match b.create_topic(TopicConfig::new(
@@ -350,32 +516,32 @@ async fn handle_broker_connection(socket: TcpStream, broker: SharedBroker, peer:
                     Err(e) => {
                         eprintln!("[broker] create topic failed: {e}");
                         b.metrics().record_error();
-                        return;
+                        return None;
                     }
                 }
             };
-            Message::RCreateTopic(code)
+            Some(Message::RCreateTopic(code))
         }
         Message::DescribeTopic(req) => {
             let bytes = {
                 let b = broker.lock().await;
                 b.describe_topic(req.topic_id)
             };
-            Message::RDescribeTopic(bytes)
+            Some(Message::RDescribeTopic(bytes))
         }
         Message::ListTopics => {
             let bytes = {
                 let b = broker.lock().await;
                 b.list_topics()
             };
-            Message::RListTopics(bytes)
+            Some(Message::RListTopics(bytes))
         }
         Message::GetLag(req) => {
             let bytes = {
                 let b = broker.lock().await;
                 b.get_lag(req.group_id, req.topic_id)
             };
-            Message::RGetLag(bytes)
+            Some(Message::RGetLag(bytes))
         }
         Message::Replicate(req) => {
             let code = {
@@ -394,58 +560,53 @@ async fn handle_broker_connection(socket: TcpStream, broker: SharedBroker, peer:
                     }
                 }
             };
-            Message::RReplicate(code)
+            Some(Message::RReplicate(code))
         }
         Message::GetCluster => {
             let bytes = {
                 let b = broker.lock().await;
                 b.cluster_info_bytes()
             };
-            Message::RGetCluster(bytes)
+            Some(Message::RGetCluster(bytes))
         }
         Message::BrokerHeartbeat(req) => {
             let code = {
                 let mut b = broker.lock().await;
-                b.handle_broker_heartbeat(&req).unwrap_or(1)
+                b.handle_broker_heartbeat(req).unwrap_or(1)
             };
-            Message::RBrokerHeartbeat(code)
+            Some(Message::RBrokerHeartbeat(code))
         }
         Message::JoinGroup(req) => {
             let bytes = {
                 let mut b = broker.lock().await;
-                match b.join_group(&req) {
-                    Ok((code, member_id, generation, parts)) => custom_dmq::message::encode_join_group_response(
-                        code,
-                        member_id,
-                        generation,
-                        &parts,
-                    ),
+                match b.join_group(req) {
+                    Ok((code, member_id, generation, parts)) => {
+                        custom_dmq::message::encode_join_group_response(
+                            code,
+                            member_id,
+                            generation,
+                            &parts,
+                        )
+                    }
                     Err(e) => {
                         eprintln!("[broker] join group failed: {e}");
                         custom_dmq::message::encode_join_group_response(1, 0, 0, &[])
                     }
                 }
             };
-            Message::RJoinGroup(bytes)
+            Some(Message::RJoinGroup(bytes))
         }
         Message::GroupHeartbeat(req) => {
             let (code, flag) = {
                 let mut b = broker.lock().await;
-                b.group_heartbeat(&req).unwrap_or((1, 1))
+                b.group_heartbeat(req).unwrap_or((1, 1))
             };
-            Message::RGroupHeartbeat(code, flag)
+            Some(Message::RGroupHeartbeat(code, flag))
         }
         other => {
             eprintln!("[broker] Unexpected message on register port: {other:?}");
-            return;
+            None
         }
-    };
-
-    if custom_dmq::message::write_message(&mut writer, &response)
-        .await
-        .is_err()
-    {
-        eprintln!("[broker] Failed to write response");
     }
 }
 

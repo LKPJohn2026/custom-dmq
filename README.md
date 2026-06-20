@@ -52,6 +52,7 @@ Design notes: [`docs/architecture.md`](docs/architecture.md).
 | **Multi-broker cluster (Phase 3)** | Static TOML cluster config, leader/follower replication, `GET_CLUSTER` metadata, and leader-aware client routing. |
 | **Production polish (Phase 4)** | Configurable fsync, idempotent produce, health/readiness probes, Docker Compose, and Kubernetes manifests. |
 | **Dynamic cluster (Phase 5)** | Embedded controller on broker 1, `BROKER_HEARTBEAT` liveness, automatic leader failover with epochs, unified log-only produce in cluster mode, `JOIN_GROUP` / `GROUP_HEARTBEAT` coordinator with range assignment. |
+| **Protocol hardening (Phase 6)** | v2 frames with correlation ids, handshake + auth, optional TLS, ACLs, lz4 fetch compression, fetch long-polling, latency histograms. Dial-back disabled by default. |
 
 ### Consistency model
 
@@ -177,6 +178,18 @@ All config is via env vars:
 | `DMQ_CONTROLLER_ID` | lowest broker id | Which broker runs the embedded controller |
 | `DMQ_LEGACY_PUSH` | off in cluster mode | Enable legacy mmap fan-out on dial-back produce |
 | `DMQ_GROUP_SESSION_TIMEOUT_MS` | `15000` | Consumer group member session timeout |
+| `DMQ_PROTOCOL_VERSION` | `2` | Client protocol version for handshake |
+| `DMQ_LEGACY_DIALBACK` | off | Enable producer/consumer dial-back registration |
+| `DMQ_AUTH_TOKEN` | _(unset)_ | Required bearer token in v2 handshake |
+| `DMQ_CLIENT_TOKEN` | _(unset)_ | Token sent by CLI clients |
+| `DMQ_TLS_CERT` / `DMQ_TLS_KEY` | _(unset)_ | Enable TLS on broker port |
+| `DMQ_TLS_CA` | _(unset)_ | CA bundle for TLS client connections |
+| `DMQ_COMPRESSION` | off | lz4-compress fetch batches |
+| `DMQ_FETCH_CONSISTENCY` | `follower` | `leader` redirects fetch from non-leaders |
+| `DMQ_ACL` | _(unset)_ | ACL rules: `principal:produce:topic_id;...` |
+| `DMQ_ACL_DENY_BY_DEFAULT` | off | Deny requests with no matching ACL rule |
+
+Protocol details: [`docs/protocol.md`](docs/protocol.md).
 
 ---
 

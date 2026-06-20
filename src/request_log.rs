@@ -28,6 +28,7 @@ pub fn request_name(message: &custom_dmq::message::Message) -> &'static str {
         Message::BrokerHeartbeat(_) => "BROKER_HEARTBEAT",
         Message::JoinGroup(_) => "JOIN_GROUP",
         Message::GroupHeartbeat(_) => "GROUP_HEARTBEAT",
+        Message::Handshake(_) => "HANDSHAKE",
         Message::REcho(_) => "R_ECHO",
         Message::RProducerRegister(_) => "R_P_REG",
         Message::RConsumerRegister(_) => "R_C_REG",
@@ -45,5 +46,7 @@ pub fn request_name(message: &custom_dmq::message::Message) -> &'static str {
         Message::RBrokerHeartbeat(_) => "R_BROKER_HEARTBEAT",
         Message::RJoinGroup(_) => "R_JOIN_GROUP",
         Message::RGroupHeartbeat(_, _) => "R_GROUP_HEARTBEAT",
+        Message::RHandshake(_, _) => "R_HANDSHAKE",
+        Message::RError(_, _) => "R_ERROR",
     }
 }

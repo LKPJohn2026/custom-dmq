@@ -30,6 +30,7 @@ async fn fetch_returns_records_from_log() {
             partition_id: 0,
             offset: 0,
             max_bytes: 1024,
+            max_wait_ms: 0,
         }),
     )
     .await

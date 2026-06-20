@@ -8,8 +8,13 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout, Duration};
 
+fn enable_legacy_dialback() {
+    std::env::set_var("DMQ_LEGACY_DIALBACK", "1");
+}
+
 #[tokio::test]
 async fn binary_protocol_roundtrip_on_duplex() {
+    enable_legacy_dialback();
     let (client, server) = tokio::io::duplex(1024);
     let (mut client_read, mut client_write) = tokio::io::split(client);
     let (mut server_read, mut server_write) = tokio::io::split(server);
@@ -35,6 +40,7 @@ async fn binary_protocol_roundtrip_on_duplex() {
 
 #[tokio::test]
 async fn ready_initiated_delivery_over_tcp() {
+    enable_legacy_dialback();
     let port = pick_free_port();
     std::env::set_var("DMQ_BROKER_PORT", port.to_string());
 
