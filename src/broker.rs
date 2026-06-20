@@ -6,6 +6,7 @@
 //! readiness with R_PCM and receive the next message from their assigned partition.
 //! Queue data and metadata are persisted under a configurable data directory.
 
+use crate::acl::{Acl, Operation};
 use crate::cluster::{BrokerId, ClusterConfig};
 use crate::cluster_state::{self, ClusterState};
 use crate::coordinator::{self, GroupState};
@@ -83,6 +84,7 @@ pub struct Broker {
     cluster_state: Option<ClusterState>,
     groups: HashMap<(u16, u16), GroupState>,
     idempotency: IdempotencyState,
+    acl: Acl,
     _temp_dir: Option<tempfile::TempDir>,
 }
 
@@ -144,6 +146,7 @@ impl Broker {
             cluster_state,
             groups: HashMap::new(),
             idempotency: IdempotencyState::load(&data_dir)?,
+            acl: Acl::from_env(),
             _temp_dir: None,
         };
         broker.load_logs()?;
@@ -307,6 +310,35 @@ impl Broker {
             return v == "1" || v.eq_ignore_ascii_case("true");
         }
         self.cluster_state.is_none()
+    }
+
+    pub fn fetch_requires_leader() -> bool {
+        std::env::var("DMQ_FETCH_CONSISTENCY")
+            .map(|v| v.eq_ignore_ascii_case("leader"))
+            .unwrap_or(false)
+    }
+
+    pub fn fetch_redirect_leader(&self, topic_id: u16, partition_id: u16) -> Option<BrokerId> {
+        if Self::fetch_requires_leader()
+            && self.cluster.is_some()
+            && !self.is_partition_leader(topic_id, partition_id)
+        {
+            Some(self.partition_leader(topic_id, partition_id))
+        } else {
+            None
+        }
+    }
+
+    pub fn check_produce_acl(&self, principal: &str, topic_id: u16) -> io::Result<()> {
+        self.acl.check(principal, Operation::Produce, topic_id)
+    }
+
+    pub fn check_fetch_acl(&self, principal: &str, topic_id: u16) -> io::Result<()> {
+        self.acl.check(principal, Operation::Fetch, topic_id)
+    }
+
+    pub fn check_admin_acl(&self, principal: &str, topic_id: u16) -> io::Result<()> {
+        self.acl.check(principal, Operation::Admin, topic_id)
     }
 
     pub fn partition_leader(&self, topic_id: u16, partition_id: u16) -> BrokerId {
@@ -1013,6 +1045,7 @@ mod tests {
             partition_id: 0,
             offset: 0,
             max_bytes: 1024,
+            max_wait_ms: 0,
         })
         .unwrap();
         assert_eq!(records.len(), 2);
@@ -1058,6 +1091,7 @@ mod tests {
                 partition_id: 0,
                 offset: 0,
                 max_bytes: 1024,
+                max_wait_ms: 0,
             })
             .unwrap();
         assert_eq!(records.len(), 2);
