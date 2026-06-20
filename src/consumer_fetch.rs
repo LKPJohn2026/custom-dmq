@@ -21,6 +21,7 @@ async fn fetch_loop(mut stream: TcpStream, topic_id: u16, group_id: u16) {
             partition_id: 0,
             offset,
             max_bytes: 64 * 1024,
+            max_wait_ms: 500,
         };
         if custom_dmq::message::write_message(&mut stream, &Message::Fetch(req))
             .await
@@ -37,7 +38,8 @@ async fn fetch_loop(mut stream: TcpStream, topic_id: u16, group_id: u16) {
             break;
         };
 
-        let records = decode_records(&bytes).expect("decode fetch batch");
+        let batch = custom_dmq::compression::unwrap_batch(&bytes).unwrap_or(bytes);
+        let records = decode_records(&batch).expect("decode fetch batch");
         if records.is_empty() {
             sleep(Duration::from_millis(100)).await;
             continue;

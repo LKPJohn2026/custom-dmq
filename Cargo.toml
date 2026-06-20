@@ -9,6 +9,11 @@ memmap2 = "0.9"
 tempfile = "3"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+lz4_flex = "0.11"
+rustls = "0.23"
+rustls-pemfile = "2"
+rustls-pki-types = "1"
+tokio-rustls = "0.26"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
