@@ -25,6 +25,9 @@ pub fn request_name(message: &custom_dmq::message::Message) -> &'static str {
         Message::GetLag(_) => "GET_LAG",
         Message::Replicate(_) => "REPLICATE",
         Message::GetCluster => "GET_CLUSTER",
+        Message::BrokerHeartbeat(_) => "BROKER_HEARTBEAT",
+        Message::JoinGroup(_) => "JOIN_GROUP",
+        Message::GroupHeartbeat(_) => "GROUP_HEARTBEAT",
         Message::REcho(_) => "R_ECHO",
         Message::RProducerRegister(_) => "R_P_REG",
         Message::RConsumerRegister(_) => "R_C_REG",
@@ -39,5 +42,8 @@ pub fn request_name(message: &custom_dmq::message::Message) -> &'static str {
         Message::RReplicate(_) => "R_REPLICATE",
         Message::RGetCluster(_) => "R_GET_CLUSTER",
         Message::RNotLeader(_) => "R_NOT_LEADER",
+        Message::RBrokerHeartbeat(_) => "R_BROKER_HEARTBEAT",
+        Message::RJoinGroup(_) => "R_JOIN_GROUP",
+        Message::RGroupHeartbeat(_, _) => "R_GROUP_HEARTBEAT",
     }
 }

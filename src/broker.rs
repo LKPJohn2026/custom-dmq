@@ -7,13 +7,14 @@
 //! Queue data and metadata are persisted under a configurable data directory.
 
 use crate::cluster::{BrokerId, ClusterConfig};
-use crate::cluster_state::ClusterState;
+use crate::cluster_state::{self, ClusterState};
+use crate::coordinator::{self, GroupState};
 use crate::idempotency::{IdempotencyAction, IdempotencyState};
 use crate::limits;
 use crate::log_store;
 use crate::message::{
-    self, CommitOffsetRequest, ConsumerRegister, FetchRequest, IdempotentProduceRequest,
-    Message, ProducerRegister,
+    self, BrokerHeartbeatRequest, CommitOffsetRequest, ConsumerRegister, FetchRequest,
+    GroupHeartbeatRequest, IdempotentProduceRequest, JoinGroupRequest, Message, ProducerRegister,
 };
 use crate::metadata::{load_committed_offset, load_topic_config, store_broker_topics, store_committed_offset, store_topic_config};
 use crate::metrics::BrokerMetrics;
@@ -80,6 +81,7 @@ pub struct Broker {
     broker_id: BrokerId,
     cluster: Option<ClusterConfig>,
     cluster_state: Option<ClusterState>,
+    groups: HashMap<(u16, u16), GroupState>,
     idempotency: IdempotencyState,
     _temp_dir: Option<tempfile::TempDir>,
 }
@@ -140,6 +142,7 @@ impl Broker {
             broker_id,
             cluster,
             cluster_state,
+            groups: HashMap::new(),
             idempotency: IdempotencyState::load(&data_dir)?,
             _temp_dir: None,
         };
@@ -179,6 +182,10 @@ impl Broker {
         self.cluster_state.as_ref()
     }
 
+    pub fn cluster_state_mut(&mut self) -> Option<&mut ClusterState> {
+        self.cluster_state.as_mut()
+    }
+
     pub fn is_controller(&self) -> bool {
         self.cluster_state
             .as_ref()
@@ -190,6 +197,116 @@ impl Broker {
         if let Some(state) = &self.cluster_state {
             self.cluster = Some(state.to_cluster_config());
         }
+    }
+
+    pub fn apply_cluster_state(&mut self, state: ClusterState) -> io::Result<()> {
+        state.store(&self.data_dir)?;
+        self.cluster_state = Some(state);
+        self.sync_cluster_view();
+        Ok(())
+    }
+
+    pub fn handle_broker_heartbeat(&mut self, req: &BrokerHeartbeatRequest) -> io::Result<u8> {
+        let Some(state) = &mut self.cluster_state else {
+            return Ok(1);
+        };
+        if !state.is_controller(self.broker_id) {
+            return Ok(1);
+        }
+        let now = cluster_state::now_ms();
+        state.record_heartbeat(req.broker_id, now);
+        let timeout = cluster_state::heartbeat_timeout_ms();
+        let _changed = state.failover_dead_leaders(now, timeout);
+        state.store(&self.data_dir)?;
+        self.sync_cluster_view();
+        Ok(0)
+    }
+
+    pub fn controller_tick(&mut self) -> io::Result<()> {
+        let Some(state) = &mut self.cluster_state else {
+            return Ok(());
+        };
+        if !state.is_controller(self.broker_id) {
+            return Ok(());
+        }
+        let now = cluster_state::now_ms();
+        state.record_heartbeat(self.broker_id, now);
+        let changed_len = self.run_failover_at(now)?;
+        if changed_len > 0 {
+            eprintln!("[controller] failover: {changed_len} partition(s) reassigned");
+        }
+        Ok(())
+    }
+
+    pub fn run_failover_at(&mut self, now_ms: u64) -> io::Result<usize> {
+        let Some(state) = &mut self.cluster_state else {
+            return Ok(0);
+        };
+        if !state.is_controller(self.broker_id) {
+            return Ok(0);
+        }
+        let timeout = cluster_state::heartbeat_timeout_ms();
+        let changed = state.failover_dead_leaders(now_ms, timeout);
+        if !changed.is_empty() {
+            state.store(&self.data_dir)?;
+            self.sync_cluster_view();
+        }
+        Ok(changed.len())
+    }
+
+    pub fn controller_addr(&self) -> Option<String> {
+        let state = self.cluster_state.as_ref()?;
+        let controller_id = state.controller_id()?;
+        state
+            .brokers
+            .iter()
+            .find(|b| b.id == controller_id)
+            .map(|b| format!("{}:{}", b.host, b.port))
+    }
+
+    pub fn join_group(
+        &mut self,
+        req: &JoinGroupRequest,
+    ) -> io::Result<(u8, u64, u32, Vec<u16>)> {
+        self.topic_mut(req.topic_id)?;
+        let partition_count = self.topic_config(req.topic_id).partition_count;
+        let key = (req.topic_id, req.group_id);
+        if !self.groups.contains_key(&key) {
+            self.groups
+                .insert(key, GroupState::new(req.group_id, req.topic_id));
+        }
+        let group = self.groups.get_mut(&key).expect("group inserted");
+        let (member_id, generation, parts) =
+            group.join(req.member_id, partition_count, cluster_state::now_ms())?;
+        Ok((0, member_id, generation, parts))
+    }
+
+    pub fn group_heartbeat(&mut self, req: &GroupHeartbeatRequest) -> io::Result<(u8, u8)> {
+        let key = self
+            .groups
+            .iter()
+            .find(|((_, gid), _)| *gid == req.group_id)
+            .map(|(k, _)| *k);
+        let Some(key) = key else {
+            return Ok((1, 1));
+        };
+        let topic_id = key.0;
+        let partition_count = self.topic_config(topic_id).partition_count;
+        let group = self.groups.get_mut(&key).expect("group exists");
+        let timeout = coordinator::session_timeout_ms();
+        if group.expire_stale_members(cluster_state::now_ms(), timeout) {
+            group.rebalance(partition_count, cluster_state::now_ms());
+        }
+        let (code, rebalance) =
+            group.heartbeat(req.member_id, req.generation, cluster_state::now_ms())?;
+        Ok((code, u8::from(rebalance)))
+    }
+
+    pub fn legacy_push_enabled(&self) -> bool {
+        if let Ok(v) = std::env::var("DMQ_LEGACY_PUSH") {
+            return v == "1" || v.eq_ignore_ascii_case("true");
+        }
+        self.cluster_state.is_none()
     }
 
     pub fn partition_leader(&self, topic_id: u16, partition_id: u16) -> BrokerId {
@@ -550,6 +667,10 @@ impl Broker {
 
     pub fn produce_pcm(&mut self, topic_id: u16, payload: &[u8]) -> io::Result<(u8, u64)> {
         let log_offset = self.append_log(topic_id, 0, payload)?;
+
+        if !self.legacy_push_enabled() {
+            return Ok((0, log_offset));
+        }
 
         let topic = self.topic_mut(topic_id)?;
 

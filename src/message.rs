@@ -23,6 +23,9 @@ pub const GET_LAG: u8 = 11;
 pub const REPLICATE: u8 = 12;
 pub const GET_CLUSTER: u8 = 13;
 pub const IDEMPOTENT_PRODUCE: u8 = 14;
+pub const BROKER_HEARTBEAT: u8 = 15;
+pub const JOIN_GROUP: u8 = 16;
+pub const GROUP_HEARTBEAT: u8 = 17;
 
 pub const R_ECHO: u8 = 101;
 pub const R_P_REG: u8 = 102;
@@ -38,6 +41,9 @@ pub const R_GET_LAG: u8 = 111;
 pub const R_REPLICATE: u8 = 112;
 pub const R_GET_CLUSTER: u8 = 113;
 pub const R_NOT_LEADER: u8 = 114;
+pub const R_BROKER_HEARTBEAT: u8 = 115;
+pub const R_JOIN_GROUP: u8 = 116;
+pub const R_GROUP_HEARTBEAT: u8 = 117;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProducerRegister {
@@ -111,6 +117,25 @@ pub struct IdempotentProduceRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrokerHeartbeatRequest {
+    pub broker_id: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JoinGroupRequest {
+    pub group_id: u16,
+    pub topic_id: u16,
+    pub member_id: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupHeartbeatRequest {
+    pub group_id: u16,
+    pub member_id: u64,
+    pub generation: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
     Echo(String),
     ProducerRegister(ProducerRegister),
@@ -126,6 +151,9 @@ pub enum Message {
     Replicate(ReplicateRequest),
     GetCluster,
     IdempotentProduce(IdempotentProduceRequest),
+    BrokerHeartbeat(BrokerHeartbeatRequest),
+    JoinGroup(JoinGroupRequest),
+    GroupHeartbeat(GroupHeartbeatRequest),
     REcho(String),
     RProducerRegister(u8),
     RConsumerRegister(u8),
@@ -140,6 +168,9 @@ pub enum Message {
     RReplicate(u8),
     RGetCluster(Vec<u8>),
     RNotLeader(u16),
+    RBrokerHeartbeat(u8),
+    RJoinGroup(Vec<u8>),
+    RGroupHeartbeat(u8, u8),
 }
 
 impl ProducerRegister {
@@ -191,6 +222,95 @@ impl ConsumerRegister {
             group_id: u16::from_be_bytes([payload[4], payload[5]]),
         })
     }
+}
+
+impl BrokerHeartbeatRequest {
+    pub fn encode(&self) -> [u8; 2] {
+        self.broker_id.to_be_bytes()
+    }
+
+    pub fn decode(payload: &[u8]) -> io::Result<Self> {
+        if payload.len() < 2 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "BROKER_HEARTBEAT payload too short",
+            ));
+        }
+        Ok(BrokerHeartbeatRequest {
+            broker_id: u16::from_be_bytes([payload[0], payload[1]]),
+        })
+    }
+}
+
+impl JoinGroupRequest {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(12);
+        out.extend_from_slice(&self.group_id.to_be_bytes());
+        out.extend_from_slice(&self.topic_id.to_be_bytes());
+        out.extend_from_slice(&self.member_id.to_be_bytes());
+        out
+    }
+
+    pub fn decode(payload: &[u8]) -> io::Result<Self> {
+        if payload.len() < 12 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "JOIN_GROUP payload too short",
+            ));
+        }
+        Ok(JoinGroupRequest {
+            group_id: u16::from_be_bytes([payload[0], payload[1]]),
+            topic_id: u16::from_be_bytes([payload[2], payload[3]]),
+            member_id: u64::from_be_bytes([
+                payload[4], payload[5], payload[6], payload[7], payload[8], payload[9],
+                payload[10], payload[11],
+            ]),
+        })
+    }
+}
+
+impl GroupHeartbeatRequest {
+    pub fn encode(&self) -> [u8; 14] {
+        let mut data = [0u8; 14];
+        data[0..2].copy_from_slice(&self.group_id.to_be_bytes());
+        data[2..10].copy_from_slice(&self.member_id.to_be_bytes());
+        data[10..14].copy_from_slice(&self.generation.to_be_bytes());
+        data
+    }
+
+    pub fn decode(payload: &[u8]) -> io::Result<Self> {
+        if payload.len() < 14 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "GROUP_HEARTBEAT payload too short",
+            ));
+        }
+        Ok(GroupHeartbeatRequest {
+            group_id: u16::from_be_bytes([payload[0], payload[1]]),
+            member_id: u64::from_be_bytes([
+                payload[2], payload[3], payload[4], payload[5], payload[6], payload[7], payload[8],
+                payload[9],
+            ]),
+            generation: u32::from_be_bytes([payload[10], payload[11], payload[12], payload[13]]),
+        })
+    }
+}
+
+pub fn encode_join_group_response(
+    code: u8,
+    member_id: u64,
+    generation: u32,
+    partitions: &[u16],
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(15 + partitions.len() * 2);
+    out.push(code);
+    out.extend_from_slice(&member_id.to_be_bytes());
+    out.extend_from_slice(&generation.to_be_bytes());
+    out.extend_from_slice(&(partitions.len() as u16).to_be_bytes());
+    for p in partitions {
+        out.extend_from_slice(&p.to_be_bytes());
+    }
+    out
 }
 
 impl FetchRequest {
@@ -452,6 +572,13 @@ pub fn parse_frame(body: &[u8]) -> io::Result<Message> {
         IDEMPOTENT_PRODUCE => Ok(Message::IdempotentProduce(
             IdempotentProduceRequest::decode(payload)?,
         )),
+        BROKER_HEARTBEAT => Ok(Message::BrokerHeartbeat(BrokerHeartbeatRequest::decode(
+            payload,
+        )?)),
+        JOIN_GROUP => Ok(Message::JoinGroup(JoinGroupRequest::decode(payload)?)),
+        GROUP_HEARTBEAT => Ok(Message::GroupHeartbeat(GroupHeartbeatRequest::decode(
+            payload,
+        )?)),
         R_ECHO => Ok(Message::REcho(
             String::from_utf8_lossy(payload).into_owned(),
         )),
@@ -505,6 +632,16 @@ pub fn parse_frame(body: &[u8]) -> io::Result<Message> {
             }
             Ok(Message::RNotLeader(u16::from_be_bytes([payload[0], payload[1]])))
         }
+        R_BROKER_HEARTBEAT => {
+            let byte = payload.first().copied().unwrap_or(0);
+            Ok(Message::RBrokerHeartbeat(byte))
+        }
+        R_JOIN_GROUP => Ok(Message::RJoinGroup(payload.to_vec())),
+        R_GROUP_HEARTBEAT => {
+            let code = payload.first().copied().unwrap_or(0);
+            let flag = payload.get(1).copied().unwrap_or(0);
+            Ok(Message::RGroupHeartbeat(code, flag))
+        }
         other => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("unknown message type {other}"),
@@ -546,6 +683,9 @@ pub async fn write_message<W: AsyncWrite + Unpin>(
         Message::Replicate(req) => frame_bytes(REPLICATE, &req.encode()),
         Message::GetCluster => frame_bytes(GET_CLUSTER, &[]),
         Message::IdempotentProduce(req) => frame_bytes(IDEMPOTENT_PRODUCE, &req.encode()),
+        Message::BrokerHeartbeat(req) => frame_bytes(BROKER_HEARTBEAT, &req.encode()),
+        Message::JoinGroup(req) => frame_bytes(JOIN_GROUP, &req.encode()),
+        Message::GroupHeartbeat(req) => frame_bytes(GROUP_HEARTBEAT, &req.encode()),
         Message::REcho(s) => frame_bytes(R_ECHO, s.as_bytes()),
         Message::RProducerRegister(b) => frame_bytes(R_P_REG, &[*b]),
         Message::RConsumerRegister(b) => frame_bytes(R_C_REG, &[*b]),
@@ -560,6 +700,11 @@ pub async fn write_message<W: AsyncWrite + Unpin>(
         Message::RReplicate(b) => frame_bytes(R_REPLICATE, &[*b]),
         Message::RGetCluster(bytes) => frame_bytes(R_GET_CLUSTER, bytes),
         Message::RNotLeader(id) => frame_bytes(R_NOT_LEADER, &id.to_be_bytes()),
+        Message::RBrokerHeartbeat(code) => frame_bytes(R_BROKER_HEARTBEAT, &[*code]),
+        Message::RJoinGroup(bytes) => frame_bytes(R_JOIN_GROUP, bytes),
+        Message::RGroupHeartbeat(code, flag) => {
+            frame_bytes(R_GROUP_HEARTBEAT, &[*code, *flag])
+        }
     };
     writer.write_all(&frame).await?;
     writer.flush().await

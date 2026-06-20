@@ -115,6 +115,13 @@ async fn run_server() {
     };
     tokio::spawn(metrics_server::run_metrics_server(metrics, data_dir));
 
+    if {
+        let guard = broker.lock().await;
+        guard.cluster_state().is_some()
+    } {
+        tokio::spawn(run_cluster_background(Arc::clone(&broker)));
+    }
+
     loop {
         match listener.accept().await {
             Ok((socket, peer)) => {
@@ -396,6 +403,38 @@ async fn handle_broker_connection(socket: TcpStream, broker: SharedBroker, peer:
             };
             Message::RGetCluster(bytes)
         }
+        Message::BrokerHeartbeat(req) => {
+            let code = {
+                let mut b = broker.lock().await;
+                b.handle_broker_heartbeat(&req).unwrap_or(1)
+            };
+            Message::RBrokerHeartbeat(code)
+        }
+        Message::JoinGroup(req) => {
+            let bytes = {
+                let mut b = broker.lock().await;
+                match b.join_group(&req) {
+                    Ok((code, member_id, generation, parts)) => custom_dmq::message::encode_join_group_response(
+                        code,
+                        member_id,
+                        generation,
+                        &parts,
+                    ),
+                    Err(e) => {
+                        eprintln!("[broker] join group failed: {e}");
+                        custom_dmq::message::encode_join_group_response(1, 0, 0, &[])
+                    }
+                }
+            };
+            Message::RJoinGroup(bytes)
+        }
+        Message::GroupHeartbeat(req) => {
+            let (code, flag) = {
+                let mut b = broker.lock().await;
+                b.group_heartbeat(&req).unwrap_or((1, 1))
+            };
+            Message::RGroupHeartbeat(code, flag)
+        }
         other => {
             eprintln!("[broker] Unexpected message on register port: {other:?}");
             return;
@@ -408,6 +447,71 @@ async fn handle_broker_connection(socket: TcpStream, broker: SharedBroker, peer:
     {
         eprintln!("[broker] Failed to write response");
     }
+}
+
+async fn run_cluster_background(broker: SharedBroker) {
+    use custom_dmq::cluster_state;
+
+    loop {
+        sleep(Duration::from_millis(cluster_state::heartbeat_interval_ms())).await;
+        let plan = {
+            let b = broker.lock().await;
+            if b.cluster_state().is_none() {
+                None
+            } else if b.is_controller() {
+                Some((true, None, b.broker_id()))
+            } else {
+                Some((false, b.controller_addr(), b.broker_id()))
+            }
+        };
+        let Some((is_controller, controller_addr, broker_id)) = plan else {
+            continue;
+        };
+        if is_controller {
+            let mut b = broker.lock().await;
+            if let Err(e) = b.controller_tick() {
+                eprintln!("[controller] tick failed: {e}");
+            }
+        } else if let Some(addr) = controller_addr {
+            if let Err(e) = send_broker_heartbeat(&addr, broker_id).await {
+                eprintln!("[broker] heartbeat to controller failed: {e}");
+            }
+            if let Err(e) = sync_cluster_state_from_controller(&broker, &addr).await {
+                eprintln!("[broker] cluster sync failed: {e}");
+            }
+        }
+    }
+}
+
+async fn send_broker_heartbeat(addr: &str, broker_id: u16) -> std::io::Result<()> {
+    use custom_dmq::message::{BrokerHeartbeatRequest, Message};
+    let mut stream = TcpStream::connect(addr).await?;
+    custom_dmq::message::write_message(
+        &mut stream,
+        &Message::BrokerHeartbeat(BrokerHeartbeatRequest { broker_id }),
+    )
+    .await?;
+    let mut reader = BufReader::new(stream);
+    let _ = custom_dmq::message::read_message(&mut reader).await?;
+    Ok(())
+}
+
+async fn sync_cluster_state_from_controller(
+    broker: &SharedBroker,
+    addr: &str,
+) -> std::io::Result<()> {
+    use custom_dmq::cluster_state::ClusterState;
+    use custom_dmq::message::Message;
+    let mut stream = TcpStream::connect(addr).await?;
+    custom_dmq::message::write_message(&mut stream, &Message::GetCluster).await?;
+    let mut reader = BufReader::new(stream);
+    let resp = custom_dmq::message::read_message(&mut reader).await?;
+    if let Message::RGetCluster(bytes) = resp {
+        let state = ClusterState::decode_cluster_info(&bytes)?;
+        let mut b = broker.lock().await;
+        b.apply_cluster_state(state)?;
+    }
+    Ok(())
 }
 
 async fn dial_back_to_producer(port: u16, topic_id: u16, broker: SharedBroker) {

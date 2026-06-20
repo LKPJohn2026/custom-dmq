@@ -4,6 +4,7 @@ pub mod broker;
 pub mod cgroup;
 pub mod cluster;
 pub mod cluster_state;
+pub mod coordinator;
 pub mod fetch_batch;
 pub mod fsync;
 pub mod idempotency;
