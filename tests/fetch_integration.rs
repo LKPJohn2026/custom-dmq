@@ -94,7 +94,7 @@ async fn run_minimal_fetch_server(broker: Arc<Mutex<Broker>>, port: u16) {
                 Message::Fetch(req) => {
                     let records = {
                         let mut b = broker.lock().await;
-                        b.fetch_log(&req)
+                        b.fetch_log(&req).unwrap_or_default()
                     };
                     let bytes = custom_dmq::fetch_batch::encode_records(&records);
                     let _ = message::write_message(&mut writer, &Message::RFetch(bytes)).await;

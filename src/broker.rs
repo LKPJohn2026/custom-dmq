@@ -311,7 +311,22 @@ impl Broker {
         Ok(())
     }
 
-    pub fn fetch_log(&mut self, req: &FetchRequest) -> Vec<Record> {
+    pub fn is_partition_replica(&self, topic_id: u16, partition_id: u16) -> bool {
+        self.cluster
+            .as_ref()
+            .map(|c| c.is_replica(self.broker_id, topic_id, partition_id))
+            .unwrap_or(true)
+    }
+
+    pub fn fetch_log(&mut self, req: &FetchRequest) -> io::Result<Vec<Record>> {
+        if self.cluster.is_some()
+            && !self.is_partition_replica(req.topic_id, req.partition_id)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "broker is not a replica for partition",
+            ));
+        }
         self.ensure_log(req.topic_id, req.partition_id);
         let max_bytes = limits::clamp_fetch_bytes(req.max_bytes) as usize;
         let log = self
@@ -322,7 +337,7 @@ impl Broker {
         let bytes: usize = result.records.iter().map(|r| r.payload.len()).sum();
         self.metrics
             .record_fetch(bytes, result.records.len());
-        result.records
+        Ok(result.records)
     }
 
     pub fn commit_offset(&mut self, req: &CommitOffsetRequest) -> io::Result<()> {
@@ -805,7 +820,8 @@ mod tests {
             partition_id: 0,
             offset: 0,
             max_bytes: 1024,
-        });
+        })
+        .unwrap();
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].payload, b"a".to_vec());
 
@@ -843,12 +859,14 @@ mod tests {
             broker.append_log(4, 0, b"two").unwrap();
         }
         let mut broker = Broker::open(dir.path()).unwrap();
-        let records = broker.fetch_log(&FetchRequest {
-            topic_id: 4,
-            partition_id: 0,
-            offset: 0,
-            max_bytes: 1024,
-        });
+        let records = broker
+            .fetch_log(&FetchRequest {
+                topic_id: 4,
+                partition_id: 0,
+                offset: 0,
+                max_bytes: 1024,
+            })
+            .unwrap();
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].payload, b"one".to_vec());
         assert_eq!(records[1].payload, b"two".to_vec());

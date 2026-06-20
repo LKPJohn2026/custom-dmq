@@ -70,10 +70,9 @@ async fn send_replicate(
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "replicate response timeout"))??;
     match resp {
         Message::RReplicate(0) => Ok(()),
-        Message::RReplicate(code) => Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!("follower replicate failed code={code}"),
-        )),
+        Message::RReplicate(code) => Err(io::Error::other(format!(
+            "follower replicate failed code={code}"
+        ))),
         other => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("unexpected replicate response: {other:?}"),
@@ -112,7 +111,8 @@ mod tests {
             partition_id: 0,
             offset: 0,
             max_bytes: 1024,
-        });
+        })
+        .unwrap();
         assert_eq!(records.len(), 1);
     }
 }

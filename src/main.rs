@@ -19,6 +19,18 @@ use tokio::time::{sleep, Duration};
 
 type SharedBroker = Arc<Mutex<Broker>>;
 
+enum ProducePlan {
+    NotLeader(u16),
+    Ack {
+        offset: u64,
+        cluster: Option<custom_dmq::cluster::ClusterConfig>,
+        topic_id: u16,
+        partition_id: u16,
+        payload: Vec<u8>,
+        local_id: u16,
+    },
+}
+
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -171,7 +183,14 @@ async fn handle_broker_connection(socket: TcpStream, broker: SharedBroker) {
         Message::Fetch(req) => {
             let records = {
                 let mut b = broker.lock().await;
-                b.fetch_log(req)
+                match b.fetch_log(req) {
+                    Ok(records) => records,
+                    Err(e) => {
+                        eprintln!("[broker] fetch failed: {e}");
+                        b.metrics().record_error();
+                        return;
+                    }
+                }
             };
             Message::RFetch(encode_records(&records))
         }
@@ -185,18 +204,66 @@ async fn handle_broker_connection(socket: TcpStream, broker: SharedBroker) {
             Message::RCommitOffset(0)
         }
         Message::Produce(req) => {
-            let offset = {
+            let topic_id = req.topic_id;
+            let partition_id = req.partition_id;
+            let payload = req.payload.clone();
+            let produce_plan = {
                 let mut b = broker.lock().await;
-                match b.append_log(req.topic_id, req.partition_id, &req.payload) {
-                    Ok(o) => o,
-                    Err(e) => {
-                        eprintln!("[broker] produce failed: {e}");
-                        b.metrics().record_error();
-                        return;
+                if b.cluster().is_some() && !b.is_partition_leader(topic_id, partition_id) {
+                    ProducePlan::NotLeader(b.partition_leader(topic_id, partition_id))
+                } else {
+                    match b.append_log(topic_id, partition_id, &payload) {
+                        Ok(offset) => ProducePlan::Ack {
+                            offset,
+                            cluster: b.cluster().cloned(),
+                            topic_id,
+                            partition_id,
+                            payload,
+                            local_id: b.broker_id(),
+                        },
+                        Err(e) => {
+                            eprintln!("[broker] produce failed: {e}");
+                            b.metrics().record_error();
+                            return;
+                        }
                     }
                 }
             };
-            Message::RProduce(offset)
+            match produce_plan {
+                ProducePlan::NotLeader(leader) => Message::RNotLeader(leader),
+                ProducePlan::Ack {
+                    offset,
+                    cluster,
+                    topic_id,
+                    partition_id,
+                    payload,
+                    local_id,
+                } => {
+                    if let Some(cluster) = cluster {
+                        let acks = custom_dmq::replication::replicate_to_followers(
+                            &cluster,
+                            local_id,
+                            topic_id,
+                            partition_id,
+                            offset,
+                            &payload,
+                        )
+                        .await
+                        .unwrap_or(0);
+                        let required = custom_dmq::replication::min_required_acks(&cluster);
+                        if custom_dmq::replication::requires_all_replicas() && acks < required {
+                            eprintln!(
+                                "[broker] insufficient replicas acked {acks}/{required} for topic {topic_id} partition {partition_id}"
+                            );
+                            {
+                                let b = broker.lock().await;
+                                b.metrics().record_error();
+                            }
+                        }
+                    }
+                    Message::RProduce(offset)
+                }
+            }
         }
         Message::CreateTopic(req) => {
             let code = {
