@@ -4,12 +4,14 @@ use custom_dmq::auth;
 use custom_dmq::client;
 use custom_dmq::message::{HandshakeRequest, Message};
 use custom_dmq::protocol::{self, Frame, WireFormat};
+use serial_test::serial;
 use std::sync::Arc;
 use tempfile::tempdir;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
 #[tokio::test]
+#[serial]
 async fn v2_handshake_and_correlation_roundtrip() {
     std::env::remove_var("DMQ_AUTH_TOKEN");
     std::env::set_var("DMQ_PROTOCOL_VERSION", "2");
@@ -44,6 +46,7 @@ async fn v2_handshake_and_correlation_roundtrip() {
 }
 
 #[tokio::test]
+#[serial]
 async fn handshake_rejects_bad_token() {
     std::env::set_var("DMQ_AUTH_TOKEN", "secret");
     let req = HandshakeRequest {
@@ -56,6 +59,7 @@ async fn handshake_rejects_bad_token() {
 }
 
 #[tokio::test]
+#[serial]
 async fn v2_frame_preserves_correlation_on_echo() {
     let (mut client, mut server) = tokio::io::duplex(4096);
     let frame = Frame::v2(7, Message::Echo("x".into()));

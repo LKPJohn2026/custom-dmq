@@ -17,3 +17,4 @@ tokio-rustls = "0.26"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
+serial_test = "3"

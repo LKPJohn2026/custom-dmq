@@ -35,8 +35,10 @@ pub fn principal_from_token(token: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
+    #[serial]
     fn validate_accepts_matching_token() {
         std::env::set_var("DMQ_AUTH_TOKEN", "secret");
         assert!(validate_token(b"secret").is_ok());
