@@ -51,6 +51,7 @@ Design notes: [`docs/architecture.md`](docs/architecture.md).
 | **Pull-based API (Phase 1)** | `produce`/`fetch` commands use `PRODUCE` + `FETCH` + `COMMIT` on the broker port, backed by an append-only log. |
 | **Multi-broker cluster (Phase 3)** | Static TOML cluster config, leader/follower replication, `GET_CLUSTER` metadata, and leader-aware client routing. |
 | **Production polish (Phase 4)** | Configurable fsync, idempotent produce, health/readiness probes, Docker Compose, and Kubernetes manifests. |
+| **Dynamic cluster (Phase 5)** | Embedded controller on broker 1, `BROKER_HEARTBEAT` liveness, automatic leader failover with epochs, unified log-only produce in cluster mode, `JOIN_GROUP` / `GROUP_HEARTBEAT` coordinator with range assignment. |
 
 ### Consistency model
 
@@ -129,6 +130,8 @@ DMQ_CLUSTER_CONFIG=config/cluster.example.toml cargo run -- admin cluster
 
 Set `DMQ_ACKS=all` to require `min_insync_replicas` followers to ack before produce succeeds.
 
+When `DMQ_CLUSTER_CONFIG` is set, the lowest broker id runs the embedded controller: brokers send periodic heartbeats, failed leaders are replaced automatically, and followers sync metadata via `GET_CLUSTER` (v2 responses include leader epochs). Legacy mmap fan-out on the dial-back path is disabled in cluster mode unless `DMQ_LEGACY_PUSH=1`.
+
 ### Idempotent produce (at-least-once retries)
 
 ```bash
@@ -169,6 +172,11 @@ All config is via env vars:
 | `DMQ_METRICS_PORT` | `9080` | Ops HTTP port (`/metrics`, `/health`, `/ready`) |
 | `DMQ_MAX_PAYLOAD_BYTES` | `255` | Max produce payload size |
 | `DMQ_MAX_FETCH_BYTES` | `65536` | Max fetch response size |
+| `DMQ_HEARTBEAT_INTERVAL_MS` | `3000` | Broker heartbeat interval to controller |
+| `DMQ_HEARTBEAT_TIMEOUT_MS` | `10000` | Leader failover when heartbeats stop |
+| `DMQ_CONTROLLER_ID` | lowest broker id | Which broker runs the embedded controller |
+| `DMQ_LEGACY_PUSH` | off in cluster mode | Enable legacy mmap fan-out on dial-back produce |
+| `DMQ_GROUP_SESSION_TIMEOUT_MS` | `15000` | Consumer group member session timeout |
 
 ---
 

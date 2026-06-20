@@ -148,7 +148,13 @@ async fn get_cluster_returns_broker_metadata() {
     let Message::RGetCluster(bytes) = resp else {
         panic!("expected cluster info");
     };
-    let decoded = ClusterConfig::decode(&bytes).unwrap();
+    let decoded = if bytes.first() == Some(&2) {
+        custom_dmq::cluster_state::ClusterState::decode_cluster_info(&bytes)
+            .unwrap()
+            .to_cluster_config()
+    } else {
+        ClusterConfig::decode(&bytes).unwrap()
+    };
     assert_eq!(decoded.brokers.len(), 2);
 
     server.abort();
