@@ -4,6 +4,7 @@ pub mod broker;
 pub mod cgroup;
 pub mod cluster;
 pub mod fetch_batch;
+pub mod fsync;
 pub mod limits;
 pub mod log_store;
 pub mod message;

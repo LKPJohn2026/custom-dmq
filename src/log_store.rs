@@ -1,5 +1,6 @@
 //! Append-only on-disk storage for partition logs.
 
+use crate::fsync;
 use crate::partition_log::{PartitionLog, Record};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, Write};
@@ -31,7 +32,7 @@ pub fn append_record(
     file.write_all(&record.offset.to_be_bytes())?;
     file.write_all(&len.to_be_bytes())?;
     file.write_all(&record.payload)?;
-    file.sync_data()?;
+    fsync::maybe_sync_data(&file)?;
     store_meta_offsets(data_dir, topic_id, partition_id, None, Some(record.offset + 1))
 }
 
@@ -101,7 +102,7 @@ pub fn load_partition_log(
 fn write_u64(file: &mut File, offset: u64, value: u64) -> io::Result<()> {
     file.seek(io::SeekFrom::Start(offset))?;
     file.write_all(&value.to_be_bytes())?;
-    file.sync_data()
+    fsync::maybe_sync_data(file)
 }
 
 #[cfg(test)]
