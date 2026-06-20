@@ -1,4 +1,4 @@
-use custom_dmq::broker::broker_addr;
+use custom_dmq::cluster::ClusterConfig;
 use custom_dmq::fetch_batch::decode_records;
 use custom_dmq::message::{CommitOffsetRequest, FetchRequest, Message};
 use tokio::io::BufReader;
@@ -6,7 +6,7 @@ use tokio::net::TcpStream;
 use tokio::time::{sleep, Duration};
 
 pub async fn run(topic_id: u16, group_id: u16) {
-    let broker_addr = broker_addr();
+    let broker_addr = ClusterConfig::resolve_leader_addr(topic_id, 0);
     let stream = TcpStream::connect(&broker_addr)
         .await
         .expect("[fetch] Could not connect to broker");

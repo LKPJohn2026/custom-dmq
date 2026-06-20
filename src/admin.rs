@@ -1,6 +1,7 @@
 //! Admin CLI for topic management and consumer lag.
 
 use custom_dmq::broker::broker_addr;
+use custom_dmq::cluster::ClusterConfig;
 use custom_dmq::message::{
     self, CreateTopicRequest, DescribeTopicRequest, GetLagRequest, Message,
 };
@@ -17,6 +18,7 @@ pub async fn run(args: &[String]) {
         "describe" => describe_topic(args).await,
         "list" => list_topics().await,
         "lag" => get_lag(args).await,
+        "cluster" => show_cluster().await,
         _ => {
             print_usage();
             std::process::exit(1);
@@ -30,7 +32,8 @@ fn print_usage() {
   custom-dmq admin create <topic_id> [partition_count] [max_records]
   custom-dmq admin describe <topic_id>
   custom-dmq admin list
-  custom-dmq admin lag <group_id> <topic_id>"
+  custom-dmq admin lag <group_id> <topic_id>
+  custom-dmq admin cluster"
     );
 }
 
@@ -154,6 +157,30 @@ async fn get_lag(args: &[String]) {
         let lag = u64::from_be_bytes(bytes[offset + 18..offset + 26].try_into().unwrap());
         println!("  partition {pid}: committed={committed} end={log_end} lag={lag}");
         offset += 26;
+    }
+}
+
+async fn show_cluster() {
+    let resp = roundtrip(Message::GetCluster).await;
+    let Message::RGetCluster(bytes) = resp else {
+        eprintln!("unexpected response: {resp:?}");
+        std::process::exit(1);
+    };
+    let cfg = ClusterConfig::decode(&bytes).unwrap_or_else(|e| {
+        eprintln!("invalid cluster response: {e}");
+        std::process::exit(1);
+    });
+    println!("min_insync_replicas={}", cfg.min_insync_replicas);
+    println!("brokers:");
+    for b in &cfg.brokers {
+        println!("  id={} addr={}:{}", b.id, b.host, b.port);
+    }
+    println!("assignments:");
+    for a in &cfg.assignments {
+        println!(
+            "  topic={} partition={} leader={} replicas={:?}",
+            a.topic_id, a.partition_id, a.leader, a.replicas
+        );
     }
 }
 

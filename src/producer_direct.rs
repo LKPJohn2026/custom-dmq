@@ -1,11 +1,11 @@
-use custom_dmq::broker::broker_addr;
+use custom_dmq::cluster::ClusterConfig;
 use custom_dmq::message::{Message, ProduceRequest};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::time::{sleep, Duration};
 
 pub async fn run(topic_id: u16, simulate: bool) {
-    let broker_addr = broker_addr();
+    let broker_addr = ClusterConfig::resolve_leader_addr(topic_id, 0);
     let stream = TcpStream::connect(&broker_addr)
         .await
         .expect("[produce] Could not connect to broker");
@@ -40,6 +40,9 @@ async fn simulate_loop(mut stream: TcpStream, topic_id: u16) {
         };
         if let Message::RProduce(offset) = resp {
             println!("[produce] appended offset={offset}");
+        } else if let Message::RNotLeader(leader) = resp {
+            eprintln!("[produce] not leader; retry on broker {leader}");
+            break;
         }
     }
 }
@@ -75,6 +78,9 @@ async fn stdin_loop(mut stream: TcpStream, topic_id: u16) {
                 };
                 match resp {
                     Message::RProduce(offset) => println!("[produce] appended offset={offset}"),
+                    Message::RNotLeader(leader) => {
+                        eprintln!("[produce] not leader; retry on broker {leader}")
+                    }
                     other => eprintln!("[produce] unexpected response: {other:?}"),
                 }
             }

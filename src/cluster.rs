@@ -158,6 +158,23 @@ impl ClusterConfig {
     pub fn broker_index(&self) -> HashMap<BrokerId, BrokerNode> {
         self.brokers.iter().map(|b| (b.id, b.clone())).collect()
     }
+
+    pub fn resolve_leader_addr(topic_id: u16, partition_id: u16) -> String {
+        match Self::from_env() {
+            Ok(Some(cfg)) => cfg
+                .leader_addr(topic_id, partition_id)
+                .unwrap_or_else(default_broker_addr),
+            _ => default_broker_addr(),
+        }
+    }
+}
+
+fn default_broker_addr() -> String {
+    let port = std::env::var("DMQ_BROKER_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(7777);
+    format!("127.0.0.1:{port}")
 }
 
 fn read_u8(payload: &[u8], offset: &mut usize) -> io::Result<u8> {
