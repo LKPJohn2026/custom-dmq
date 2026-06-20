@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: dmq
+spec:
+  serviceName: dmq-headless
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: dmq
+  template:
+    metadata:
+      labels:
+        app: dmq
+    spec:
+      containers:
+        - name: dmq
+          image: custom-dmq:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              ORD="${HOSTNAME##*-}"
+              export DMQ_BROKER_ID=$((ORD + 1))
+              exec custom-dmq server
+          ports:
+            - containerPort: 7777
+              name: broker
+            - containerPort: 9080
+              name: ops
+          env:
+            - name: DMQ_BROKER_PORT
+              value: "7777"
+            - name: DMQ_METRICS_PORT
+              value: "9080"
+            - name: DMQ_DATA_DIR
+              value: /data
+            - name: DMQ_CLUSTER_CONFIG
+              value: /etc/dmq/cluster.toml
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: ops
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: ops
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: cluster-config
+              mountPath: /etc/dmq
+              readOnly: true
+      volumes:
+        - name: cluster-config
+          configMap:
+            name: dmq-cluster-config
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
