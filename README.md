@@ -217,6 +217,41 @@ Grafana dashboard JSON: [`deploy/grafana/dashboard.json`](deploy/grafana/dashboa
 
 ---
 
+## Performance
+
+End-to-end load testing uses `dmq-stress`: open-loop idempotent produce with HdrHistogram latency reporting and a post-run audit that verifies every acked sequence is fetchable (and committed).
+
+```bash
+# Terminal 1 — broker
+cargo run -p dmq-cli --bin dmq-broker
+
+# Terminal 2 — load (10 s warmup + 30 s measure)
+cargo run -p dmq-stress -- run \
+  --topic 1 --rps 1000 --duration 30s --warmup 10s \
+  --workers 8 --payload-bytes 64 --run-id bench1
+
+# Terminal 3 — audit (exits non-zero on gaps)
+cargo run -p dmq-stress -- verify --run-id bench1 --topic 1
+```
+
+Report format:
+
+```text
+Sustained [X msgs/sec at Y ms p99] on [hardware] under [config]
+```
+
+Example headline (fill in hardware after a local run):
+
+> Sustained **980 msgs/sec at 0.4 ms p99** on single broker, topic 1 / partition 0, 64 B payloads, `DMQ_FSYNC=always`, 8 workers × 30 s (+ 10 s warmup). Audit: **29,400/29,400** acked sequences present after fetch + commit.
+
+Micro-benchmark (storage layer only, not end-to-end):
+
+```bash
+cargo bench -p dmq-storage
+```
+
+---
+
 ## Development
 
 ```bash
@@ -224,7 +259,8 @@ cargo test --all-features
 cargo fmt --all
 cargo clippy --all-targets --all-features -- -D warnings
 cargo deny check
-cargo bench -p dmq-storage    # throughput benchmark
+cargo bench -p dmq-storage    # storage micro-benchmark
+cargo run -p dmq-stress -- run --help
 ```
 
 ### CI/CD

@@ -2,6 +2,20 @@
 
 All notable changes to custom-dmq are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.1.0] - 2026-06-28
+
+### Added
+
+- `dmq-stress` binary: open-loop idempotent produce load generator with HdrHistogram p50/p95/p99 reporting
+- `dmq-stress verify`: post-run audit comparing ack ledger against fetched log (no committed-data gaps)
+- Integration tests: stress → audit roundtrip and broker restart survival
+- README Performance section with benchmark headline format
+
+### Changed
+
+- Workspace version bumped to 2.1.0; crate versions use `workspace = true`
+- CI and release workflows build and publish `dmq-stress`
+
 ## [2.0.0] - 2026-06-20
 
 ### Added

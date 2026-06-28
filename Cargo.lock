@@ -280,9 +280,10 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
 name = "custom-dmq-integration"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "dmq-broker",
+ "dmq-stress",
  "serial_test",
  "tempfile",
  "tokio",
@@ -290,7 +291,7 @@ dependencies = [
 
 [[package]]
 name = "dmq-broker"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "dmq-core",
  "dmq-protocol",
@@ -304,7 +305,7 @@ dependencies = [
 
 [[package]]
 name = "dmq-cli"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "dmq-broker",
  "tokio",
@@ -312,7 +313,7 @@ dependencies = [
 
 [[package]]
 name = "dmq-core"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "dmq-protocol",
  "dmq-storage",
@@ -324,14 +325,14 @@ dependencies = [
 
 [[package]]
 name = "dmq-protocol"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "tokio",
 ]
 
 [[package]]
 name = "dmq-storage"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "criterion",
  "memmap2",
@@ -342,7 +343,7 @@ dependencies = [
 
 [[package]]
 name = "dmq-stress"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "dmq-broker",
  "hdrhistogram",

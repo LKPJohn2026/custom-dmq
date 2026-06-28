@@ -1,6 +1,6 @@
 [package]
 name = "dmq-stress"
-version = "2.0.0"
+version.workspace = true
 edition = "2021"
 license.workspace = true
 description = "End-to-end load generator and audit tool for custom-dmq"
