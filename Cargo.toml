@@ -33,6 +33,7 @@ path = "src/lib.rs"
 
 [dev-dependencies]
 custom_dmq = { package = "dmq-broker", path = "crates/dmq-broker" }
+dmq-stress = { path = "crates/dmq-stress" }
 tokio = { workspace = true, features = ["full", "test-util"] }
 tempfile = { workspace = true }
 serial_test = { workspace = true }

@@ -20,6 +20,15 @@ impl StressConfig {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct VerifyConfig {
+    pub topic_id: u16,
+    pub partition_id: u16,
+    pub run_id: String,
+    pub ledger_path: Option<String>,
+    pub group_id: u16,
+}
+
 pub fn parse_duration(text: &str) -> Option<Duration> {
     if let Some(secs) = text.strip_suffix('s') {
         secs.parse::<u64>().ok().map(Duration::from_secs)
@@ -115,6 +124,54 @@ pub fn parse_stress_args(args: &[String]) -> Result<StressConfig, String> {
         payload_bytes,
         producer_id,
         ledger_path,
+    })
+}
+
+pub fn parse_verify_args(args: &[String]) -> Result<VerifyConfig, String> {
+    let mut topic_id = 1u16;
+    let mut partition_id = 0u16;
+    let mut run_id = String::new();
+    let mut ledger_path = None;
+    let mut group_id = 1u16;
+
+    let mut idx = 2;
+    while idx < args.len() {
+        match args[idx].as_str() {
+            "--topic" => {
+                idx += 1;
+                topic_id = next_u16(args, idx, "topic")?;
+            }
+            "--partition" => {
+                idx += 1;
+                partition_id = next_u16(args, idx, "partition")?;
+            }
+            "--run-id" => {
+                idx += 1;
+                run_id = next_string(args, idx, "run-id")?;
+            }
+            "--ledger" => {
+                idx += 1;
+                ledger_path = Some(next_string(args, idx, "ledger")?);
+            }
+            "--group" => {
+                idx += 1;
+                group_id = next_u16(args, idx, "group")?;
+            }
+            flag => return Err(format!("unknown flag: {flag}")),
+        }
+        idx += 1;
+    }
+
+    if run_id.is_empty() {
+        return Err("--run-id is required for verify".into());
+    }
+
+    Ok(VerifyConfig {
+        topic_id,
+        partition_id,
+        run_id,
+        ledger_path,
+        group_id,
     })
 }
 

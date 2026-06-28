@@ -1,5 +1,5 @@
-use dmq_stress::config::parse_stress_args;
-use dmq_stress::run_stress;
+use dmq_stress::config::{parse_stress_args, parse_verify_args};
+use dmq_stress::{audit_topic, run_stress};
 
 #[tokio::main]
 async fn main() {
@@ -18,6 +18,18 @@ async fn main() {
             });
             run_stress(config).await.map(|_| ())
         }
+        "verify" => {
+            let config = parse_verify_args(&args).unwrap_or_else(|e| {
+                eprintln!("{e}");
+                print_usage();
+                std::process::exit(1);
+            });
+            audit_topic(config).await.map(|report| {
+                if !report.ok() {
+                    std::process::exit(1);
+                }
+            })
+        }
         _ => {
             eprintln!("unknown subcommand: {}", args[1]);
             print_usage();
@@ -35,6 +47,7 @@ fn print_usage() {
     eprintln!(
         "Usage:
   dmq-stress run [--topic ID] [--rps N] [--duration 60s] [--warmup 10s]
-                 [--workers N] [--payload-bytes N] [--run-id ID] [--ledger PATH]"
+                 [--workers N] [--payload-bytes N] [--run-id ID] [--ledger PATH]
+  dmq-stress verify --run-id ID [--topic ID] [--ledger PATH] [--group ID]"
     );
 }
