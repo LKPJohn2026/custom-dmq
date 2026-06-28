@@ -1,0 +1,18 @@
+[package]
+name = "dmq-stress"
+version = "2.0.0"
+edition = "2021"
+license.workspace = true
+description = "End-to-end load generator and audit tool for custom-dmq"
+
+[[bin]]
+name = "dmq-stress"
+path = "src/main.rs"
+
+[dependencies]
+custom_dmq = { package = "dmq-broker", path = "../dmq-broker" }
+hdrhistogram = "7"
+tokio = { version = "1", features = ["full"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

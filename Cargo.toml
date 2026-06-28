@@ -5,6 +5,7 @@ members = [
     "crates/dmq-core",
     "crates/dmq-broker",
     "crates/dmq-cli",
+    "crates/dmq-stress",
     ".",
 ]
 resolver = "2"
